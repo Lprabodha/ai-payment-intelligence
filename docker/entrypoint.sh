@@ -1,7 +1,7 @@
 #!/bin/bash
 service cron start
 
-python3 /src/gateways/stripe_client.py
+python3 /src/ai_models/subscription_revenue_forecasting.py
 
 tail -f /dev/null
 
