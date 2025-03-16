@@ -7,7 +7,7 @@ build:
 	docker build -t $(IMAGE_NAME) -f docker/Dockerfile .
 
 up:
-	docker run -d --name $(CONTAINER_NAME) --restart=always -p 8000:8000 $(IMAGE_NAME)
+	docker run -d --name $(CONTAINER_NAME) --restart=always -p 8010:8010 $(IMAGE_NAME)
 
 down:
 	docker stop $(CONTAINER_NAME)

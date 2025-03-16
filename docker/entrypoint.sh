@@ -1,7 +1,7 @@
 #!/bin/bash
 service cron start
 
-python3 /src/ai_models/chargeback_prediction.py
+python3 /src/ai_models/fraud_detection.py
 
 tail -f /dev/null
 
