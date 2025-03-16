@@ -85,6 +85,6 @@ print(confusion_matrix(y_test, y_pred))
 print(classification_report(y_test, y_pred))
 
 
-joblib.dump(model, "chargeback_prediction_model.pkl")
-joblib.dump(scaler, "chargeback_prediction_scaler.pkl")
+joblib.dump(model, "/src/data/models/chargeback_prediction_model.pkl")
+joblib.dump(scaler, "/src/data/models/chargeback_prediction_scaler.pkl")
 print("✅ Chargeback Prediction Model and Scaler saved successfully.")

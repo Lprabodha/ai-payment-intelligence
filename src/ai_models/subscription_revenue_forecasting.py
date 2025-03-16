@@ -96,7 +96,7 @@ print("📊 R2 Score:", r2_score(y_test, y_pred))
 
 import datetime
 timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-joblib.dump(model, "subscription_revenue_forecasting_model.pkl")
-joblib.dump(scaler, "subscription_revenue_scaler}.pkl")
-joblib.dump(label_encoders, "subscription_revenue_label_encoders.pkl")
+joblib.dump(model, "/src/data/models/subscription_revenue_forecasting_model.pkl")
+joblib.dump(scaler, "/src/data/models/subscription_revenue_scaler}.pkl")
+joblib.dump(label_encoders, "/src/data/models/subscription_revenue_label_encoders.pkl")
 print("✅ Enhanced Subscription Revenue Forecasting Model  saved successfully.")
