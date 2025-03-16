@@ -1,2 +1,3 @@
 * * * * * /usr/local/bin/python3 /src/gateways/stripe_client.py >> /src/logs/stripe_client.log 2>&1
+* * * * * /usr/local/bin/python3 /src/ai_models/fraud_detection.py >> /src/logs/fraud_detection.log 2>&1
 
