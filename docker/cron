@@ -1,5 +1,2 @@
-#* * * * * /usr/local/bin/python3 /src/main.py >> /src/logs/main.log 2>&1
 * * * * * /usr/local/bin/python3 /src/gateways/stripe_client.py >> /src/logs/stripe_client.log 2>&1
 
-
-# 0 */2 * * * /usr/local/bin/python3 /src/main.py >> /src/logs/main.log 2>&1
