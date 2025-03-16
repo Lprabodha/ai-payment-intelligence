@@ -189,7 +189,7 @@ def fetch_and_store_transactions_by_email():
             
             
 if __name__ == '__main__':
-    fetch_and_store_customers_by_email()
+    # fetch_and_store_customers_by_email()
     fetch_and_store_subscriptions_by_email()
     fetch_and_store_transactions_by_email()
     print("✅ All Stripe data fetched and stored by email successfully!")
