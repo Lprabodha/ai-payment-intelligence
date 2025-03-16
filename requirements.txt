@@ -1,0 +1,11 @@
+numpy
+pandas
+scikit-learn
+requests
+nltk
+pymongo
+python-dotenv
+fastapi
+xgboost
+imblearn
+stripe>=11.0.0
