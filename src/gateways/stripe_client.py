@@ -179,7 +179,6 @@ def fetch_and_store_transactions_by_email():
                 "billing_address_postal_code": billing_details.get('address', {}).get('postal_code', None),
                 "billing_address_city": billing_details.get('address', {}).get('city', None),
                 "billing_address_state": billing_details.get('address', {}).get('state', None),
-                "receipt_url": charge.get('receipt_url', None),
                 "refunded": charge['refunded'],
                 "amount_refunded": charge.get('amount_refunded', 0) / 100,
                 "disputed": charge['disputed'],
