@@ -8,4 +8,5 @@ python-dotenv
 fastapi
 xgboost
 imblearn
+optuna
 stripe>=11.0.0

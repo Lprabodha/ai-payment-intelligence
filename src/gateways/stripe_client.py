@@ -24,10 +24,11 @@ def fetch_and_store_customers_by_email():
         email = customer['email'] or 'unknown@example.com' 
 
         existing_customer = customers_collection.find_one({"email": email})
+        if existing_customer:
+            continue 
 
         address = customer.get('address') or {}
         tax_info = customer.get('tax_info') or {}
-
         default_payment_method = customer.get('invoice_settings', {}).get('default_payment_method', None)
 
         customer_record = {
@@ -51,24 +52,12 @@ def fetch_and_store_customers_by_email():
             },
             "metadata": customer.get('metadata', {}), 
             "invoice_prefix": customer.get('invoice_prefix', None), 
+            "gateway_customer_ids": {'stripe': customer['id']}
         }
 
-        if existing_customer:
-            existing_ids = existing_customer.get('gateway_customer_ids', {})
-            existing_ids['stripe'] = customer['id']
-            customer_record['gateway_customer_ids'] = existing_ids
-        else:
-            customer_record['gateway_customer_ids'] = {'stripe': customer['id']}
+        customers_collection.insert_one(customer_record)
+        print(f"✅ Stored new customer {email}")
 
-        customers_collection.update_one(
-            {"email": email},
-            {"$set": customer_record},
-            upsert=True
-        )
-        print(f"✅ Stored customer {email}")
-
-
-from datetime import datetime
 
 def fetch_and_store_subscriptions_by_email():
     print("Fetching Stripe subscriptions...")
@@ -83,6 +72,12 @@ def fetch_and_store_subscriptions_by_email():
         subscriptions = stripe.Subscription.list(customer=stripe_customer_id, limit=100)
 
         for sub in subscriptions.auto_paging_iter():
+            sub_id = sub['id']
+
+            existing_subscription = subscriptions_collection.find_one({"subscription_id": sub_id})
+            if existing_subscription:
+                continue  
+
             items = sub['items']['data']
             first_item = items[0] if items else {}
 
@@ -95,7 +90,7 @@ def fetch_and_store_subscriptions_by_email():
             metadata = sub.get('metadata', {})
 
             sub_data = {
-                "subscription_id": sub['id'],
+                "subscription_id": sub_id,
                 "email": email,
                 "gateway": "Stripe",
                 "status": sub['status'],
@@ -121,12 +116,8 @@ def fetch_and_store_subscriptions_by_email():
                 "billing_cycle_anchor": datetime.utcfromtimestamp(sub['billing_cycle_anchor']) if sub.get('billing_cycle_anchor') else None
             }
 
-            subscriptions_collection.update_one(
-                {"subscription_id": sub['id']},
-                {"$set": sub_data},
-                upsert=True
-            )
-            print(f"✅ Stored subscription {sub['id']} for {email}")
+            subscriptions_collection.insert_one(sub_data)
+            print(f"✅ Stored new subscription {sub_id} for {email}")
 
 
 def fetch_and_store_transactions_by_email():
@@ -142,6 +133,12 @@ def fetch_and_store_transactions_by_email():
         charges = stripe.Charge.list(customer=stripe_customer_id, limit=100)
 
         for charge in charges.auto_paging_iter():
+            transaction_id = charge['id']
+
+            existing_transaction = transactions_collection.find_one({"transaction_id": transaction_id})
+            if existing_transaction:
+                continue  
+
             card_details = charge.get('payment_method_details', {}).get('card', {})
 
             outcome = charge.get('outcome', {})
@@ -149,7 +146,7 @@ def fetch_and_store_transactions_by_email():
             billing_details = charge.get('billing_details', {})
 
             transaction_data = {
-                "transaction_id": charge['id'],
+                "transaction_id": transaction_id,
                 "email": email,
                 "amount": charge['amount'] / 100, 
                 "currency": charge['currency'],
@@ -187,13 +184,10 @@ def fetch_and_store_transactions_by_email():
                 "created_at": datetime.utcfromtimestamp(charge['created'])
             }
 
-            transactions_collection.update_one(
-                {"transaction_id": charge['id']},
-                {"$set": transaction_data},
-                upsert=True
-            )
-            print(f"✅ Stored transaction {charge['id']} for {email}")
-
+            transactions_collection.insert_one(transaction_data)
+            print(f"✅ Stored new transaction {transaction_id} for {email}")
+            
+            
 if __name__ == '__main__':
     fetch_and_store_customers_by_email()
     fetch_and_store_subscriptions_by_email()

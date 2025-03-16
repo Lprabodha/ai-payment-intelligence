@@ -1,7 +1,7 @@
 .PHONY: build run shell stop rm logs
 
-IMAGE_NAME=ai-payment
-CONTAINER_NAME=ai-payment
+IMAGE_NAME=ai-payment-intelligence
+CONTAINER_NAME=ai-payment-intelligence
 
 build:
 	docker build -t $(IMAGE_NAME) -f docker/Dockerfile .
