@@ -1,4 +1,4 @@
-* * * * * /usr/local/bin/python3 /src/gateways/stripe_client.py >> /src/logs/stripe_client.log 2>&1
+*/10 * * * * /usr/local/bin/python3 /src/gateways/stripe_client.py >> /src/logs/stripe_client.log 2>&1
 0 */2 * * * /usr/local/bin/python3 /src/ai_models/fraud_detection.py >> /src/logs/fraud_detection.log 2>&1
 0 */2 * * * /usr/local/bin/python3 /src/ai_models/chargeback_prediction.py >> /src/logs/chargeback_prediction.log 2>&1
 0 */2 * * * /usr/local/bin/python3 /src/ai_models/subscription_revenue_forecasting.py >> /src/logs/subscription_revenue_forecasting.log 2>&1
