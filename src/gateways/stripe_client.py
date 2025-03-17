@@ -3,6 +3,7 @@ from pymongo import MongoClient
 from datetime import datetime
 import os
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
 
 load_dotenv()
 
@@ -189,7 +190,8 @@ def fetch_and_store_transactions_by_email():
             
             
 if __name__ == '__main__':
-    # fetch_and_store_customers_by_email()
-    fetch_and_store_subscriptions_by_email()
-    fetch_and_store_transactions_by_email()
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        executor.submit(fetch_and_store_customers_by_email)
+        executor.submit(fetch_and_store_subscriptions_by_email)
+        executor.submit(fetch_and_store_transactions_by_email)
     print("✅ All Stripe data fetched and stored by email successfully!")
