@@ -6,6 +6,8 @@ nltk
 pymongo
 python-dotenv
 fastapi
+uvicorn
+tensorflow
 xgboost
 imblearn
 optuna

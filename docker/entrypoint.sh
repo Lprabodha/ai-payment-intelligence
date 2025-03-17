@@ -1,8 +1,7 @@
-#!/bin/bash
-service cron start
+#!/bin/sh
 
-python3 /src/ai_models/subscription_revenue_forecasting.py
+echo "🚀 Starting Cron and FastAPI..."
 
-tail -f /dev/null
+cron &
 
-uvicorn src.api:app --host 0.0.0.0 --port 8010 --reload
+uvicorn src.api.routes:app --host 0.0.0.0 --port 8010 --reload
