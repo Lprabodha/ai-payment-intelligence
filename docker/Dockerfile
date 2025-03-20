@@ -4,6 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /src
+ENV PYTHONPATH=/src 
 
 RUN apt-get update && apt-get install -y cron && rm -rf /var/lib/apt/lists/*
 
@@ -17,6 +18,7 @@ COPY ./docker/entrypoint.sh /entrypoint.sh
 COPY ./docker/cron /cron
 
 COPY ../src/.env /src/.env
+COPY ./src/data/models /src/data/models
 
 RUN chmod +x /entrypoint.sh
 
