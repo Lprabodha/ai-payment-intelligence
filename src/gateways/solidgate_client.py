@@ -74,12 +74,6 @@ def fetch_and_store_solidgate_orders():
     result = solidgate_post("/card-orders", data)
     orders = result.get('orders')
 
-    print(result)
-    
-    if not orders:
-        print("❌ No orders found in Solidgate response.")
-        return
-
     for order in orders:
         transaction_id = order.get('transactions', [{}])[0].get('id')
         if not transaction_id:
