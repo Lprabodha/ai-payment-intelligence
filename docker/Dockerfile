@@ -18,9 +18,10 @@ COPY ./docker/entrypoint.sh /entrypoint.sh
 COPY ./docker/cron /cron
 
 COPY ../src/.env /src/.env
-COPY ./src/data/models /src/data/models
 
 RUN chmod +x /entrypoint.sh
+
+RUN mkdir -p /src/data/models
 
 RUN mkdir -p /src/model
 

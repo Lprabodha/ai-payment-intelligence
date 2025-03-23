@@ -1,4 +1,4 @@
-.PHONY: build run shell stop rm logs
+.PHONY: build up down shell logs
 
 IMAGE_NAME=ai-payment-intelligence
 CONTAINER_NAME=ai-payment-intelligence
@@ -7,7 +7,9 @@ build:
 	docker build -t $(IMAGE_NAME) -f docker/Dockerfile .
 
 up:
-	docker run -d --name $(CONTAINER_NAME) --restart=always -p 8010:8010 $(IMAGE_NAME)
+	docker run -d --name $(CONTAINER_NAME) --restart=always \
+		-v $(PWD)/src/data/models:/src/data/models \
+		-p 8010:8010 $(IMAGE_NAME)
 
 down:
 	docker stop $(CONTAINER_NAME)

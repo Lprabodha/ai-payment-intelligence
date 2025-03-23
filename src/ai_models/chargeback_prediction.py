@@ -3,20 +3,24 @@ import numpy as np
 from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import (
+    classification_report, confusion_matrix, accuracy_score,
+    precision_score, recall_score, f1_score, roc_auc_score, RocCurveDisplay
+)
 from imblearn.over_sampling import RandomOverSampler
-import joblib
 from pymongo import MongoClient
+import joblib
 import os
+import json
+import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
 load_dotenv()
-
 MONGO_URI = os.getenv("MONGO_URI")
+
 client = MongoClient(MONGO_URI)
 db = client['payment_intelligence']
 transactions_collection = db['transactions']
-
 transactions = list(transactions_collection.find())
 df = pd.DataFrame(transactions)
 print(df.head())
@@ -42,16 +46,13 @@ df['ip_country_mismatch'] = (df['card_country'] != df['ip_address']).astype(int)
 df['email_domain_risk'] = df['email'].apply(lambda x: 1 if x.split('@')[-1] in ['gmail.com', 'yahoo.com', 'hotmail.com'] else 0)
 df['past_chargebacks'] = df.groupby('email')['disputed'].transform('sum')
 
-
 y = df['disputed'].astype(int)
-
 feature_columns = [
     'amount_log', 'hour', 'is_weekend', 'ip_address_reuse_count', 'fingerprint_reuse_count',
     'device_ip_pair_reuse_count', 'risk_score', 'email_transaction_count',
     'customer_refund_ratio', 'country_mismatch', 'ip_country_mismatch', 'time_between_transactions',
     'email_domain_risk', 'transaction_amount_diff', 'past_chargebacks'
 ]
-
 X = df[feature_columns].replace('unknown', 0).apply(pd.to_numeric, errors='coerce').fillna(0)
 
 ros = RandomOverSampler(random_state=42)
@@ -60,6 +61,9 @@ print(f"Balanced dataset shape: {X_balanced.shape}, Labels: {np.bincount(y_balan
 
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X_balanced)
+
+X_temp, X_val, y_temp, y_val = train_test_split(X_scaled, y_balanced, test_size=0.1, stratify=y_balanced, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X_temp, y_temp, test_size=0.2, stratify=y_temp, random_state=42)
 
 model = XGBClassifier(
     n_estimators=800,
@@ -73,18 +77,58 @@ model = XGBClassifier(
 
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 scores = cross_val_score(model, X_scaled, y_balanced, cv=skf, scoring='f1')
-print(f"✅ Stratified F1 scores: {scores}, Mean F1 Score: {scores.mean()}")
+print(f"✅ Stratified F1 scores: {scores}, Mean F1 Score: {scores.mean():.4f}")
 
-
-X_train, X_test, y_train, y_test = train_test_split(X_scaled, y_balanced, test_size=0.2, stratify=y_balanced, random_state=42)
 model.fit(X_train, y_train)
 print("✅ Final Chargeback Prediction AI Model trained successfully.")
 
+def print_metrics(y_true, y_pred):
+    print(f"Accuracy: {accuracy_score(y_true, y_pred):.4f}")
+    print(f"Precision: {precision_score(y_true, y_pred):.4f}")
+    print(f"Recall: {recall_score(y_true, y_pred):.4f}")
+    print(f"F1 Score: {f1_score(y_true, y_pred):.4f}")
+    print(confusion_matrix(y_true, y_pred))
+    print(classification_report(y_true, y_pred))
+
 y_pred = model.predict(X_test)
-print(confusion_matrix(y_test, y_pred))
-print(classification_report(y_test, y_pred))
+print_metrics(y_test, y_pred)
 
+y_proba = model.predict_proba(X_test)[:, 1]
+roc_auc = roc_auc_score(y_test, y_proba)
+print(f"ROC AUC Score: {roc_auc:.4f}")
 
+RocCurveDisplay.from_predictions(y_test, y_proba)
+plt.title("ROC Curve")
+plt.show()
+
+importances = model.feature_importances_
+features = X.columns
+indices = np.argsort(importances)[::-1]
+
+plt.figure(figsize=(10, 6))
+plt.title("Feature Importances")
+plt.bar(range(len(importances)), importances[indices])
+plt.xticks(range(len(importances)), [features[i] for i in indices], rotation=90)
+plt.tight_layout()
+plt.show()
+
+os.makedirs("/src/data/models", exist_ok=True)
 joblib.dump(model, "/src/data/models/chargeback_prediction_model.pkl")
 joblib.dump(scaler, "/src/data/models/chargeback_prediction_scaler.pkl")
-print("✅ Chargeback Prediction Model and Scaler saved successfully.")
+print("✅ Model and Scaler saved successfully.")
+
+report = classification_report(y_test, y_pred, output_dict=True)
+with open("/src/data/models/chargeback_prediction_report.json", "w") as f:
+    json.dump(report, f, indent=4)
+
+model_metadata = {
+    "model_version": "1.0.0",
+    "created_at": pd.Timestamp.now().isoformat(),
+    "features_used": feature_columns,
+    "f1_score": f1_score(y_test, y_pred),
+    "roc_auc": roc_auc
+}
+with open("/src/data/models/metadata.json", "w") as f:
+    json.dump(model_metadata, f, indent=4)
+
+print("✅ Validation report and metadata saved.")
