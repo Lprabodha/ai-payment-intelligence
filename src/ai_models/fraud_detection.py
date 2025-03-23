@@ -9,6 +9,8 @@ from pymongo import MongoClient
 import os
 from dotenv import load_dotenv
 
+print("Starting Fruad Detection")
+
 load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI")

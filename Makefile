@@ -1,20 +1,42 @@
-.PHONY: build run shell stop rm logs
+DOCKER_COMPOSE_FILE=docker-compose.yml
 
-IMAGE_NAME=ai-payment-intelligence
-CONTAINER_NAME=ai-payment-intelligence
+# Default target
+.PHONY: all
+all: build install up
 
+# Build the Docker image
+.PHONY: build
 build:
-	docker build -t $(IMAGE_NAME) -f docker/Dockerfile .
+	docker compose -f $(DOCKER_COMPOSE_FILE) build
 
+# Install the requirements
+.PHONY: install
+install:
+	@docker exec -it ai-payment-intelligence-app /bin/sh -c "pip install --upgrade pip && pip install -r requirements.txt"
+
+# Start the Docker Compose services
+.PHONY: up
 up:
-	docker run -d --name $(CONTAINER_NAME) --restart=always -p 8010:8010 $(IMAGE_NAME)
+	docker compose -f $(DOCKER_COMPOSE_FILE) up -d
 
+# Stop the Docker Compose services
+.PHONY: down
 down:
-	docker stop $(CONTAINER_NAME)
-	docker rm $(CONTAINER_NAME)
+	docker compose -f $(DOCKER_COMPOSE_FILE) down
 
+# Run a Python command inside the Docker container
+.PHONY: run
+run:
+	docker compose -f $(DOCKER_COMPOSE_FILE) exec app python /src/ai_models/fraud_detection.py
+
+.PHONY: shell
 shell:
-	docker exec -it $(CONTAINER_NAME) /bin/bash
+	docker compose -f $(DOCKER_COMPOSE_FILE) exec app /bin/bash
 
-logs:
-	docker logs -f $(CONTAINER_NAME)
+.PHONY: clear-cache
+clear-cache:
+	docker container prune -f
+	docker image prune -a -f
+	docker volume prune -f
+	docker network prune -f
+	docker builder prune -a -f

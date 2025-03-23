@@ -1,33 +1,29 @@
-FROM python:3.9-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+FROM python:3.10-slim
 
 WORKDIR /src
-ENV PYTHONPATH=/src 
+ENV PYTHONPATH=/src
 
 RUN apt-get update && apt-get install -y cron && rm -rf /var/lib/apt/lists/*
 
-COPY ./requirements.txt /src/requirements.txt
-
-RUN pip install --upgrade pip && pip install -r requirements.txt
-
-COPY ./src /src
-
-COPY ./docker/entrypoint.sh /entrypoint.sh
+COPY ./src/.env /src/.env
 COPY ./docker/cron /cron
 
-COPY ../src/.env /src/.env
-COPY ./src/data/models /src/data/models
+RUN mkdir -p /src/model /src/logs
 
-RUN chmod +x /entrypoint.sh
+RUN echo "* * * * * /src/sh.sh >> /src/logs/cron.log 2>&1" > /cron \
+    && cron /cron/cron
 
-RUN mkdir -p /src/model
+RUN touch /src/entrypoint.sh
 
-RUN mkdir -p /src/logs
+RUN echo '#!/bin/sh' > /src/entrypoint.sh && \
+    echo 'echo "🚀 Starting Cron and FastAPI..."' >> /src/entrypoint.sh && \
+    echo 'cron &' >> /src/entrypoint.sh && \
+    echo 'uvicorn api.main:app --host 0.0.0.0 --port 8010 --reload' >> /src/entrypoint.sh
 
-RUN echo "" >> /cron && crontab /cron
+RUN chmod +x /src/entrypoint.sh
+
 
 EXPOSE 8010
 
-ENTRYPOINT ["/entrypoint.sh"]
+# ENTRYPOINT ["/src/entrypoint.sh"]
+CMD ["tail", "-f", "/dev/null"]
