@@ -1,7 +1,7 @@
 #!/bin/sh
 
-echo "🚀 Starting Cron and FastAPI..."
+echo "🚀 Starting cron and FastAPI..."
 
 cron &
 
-uvicorn api.main:app --host 0.0.0.0 --port 8010 --reload
+uvicorn main:app --host 0.0.0.0 --port 8010 --reload

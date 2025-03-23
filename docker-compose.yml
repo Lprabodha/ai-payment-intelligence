@@ -2,15 +2,13 @@ version: '3.8'
 
 services:
   app:
-    build: 
+    build:
       context: .
-      dockerfile: ./docker/Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: ai-payment-intelligence-app
-    # command: python ./src/ai_models/fraud_detection.py
-    volumes:
-      - ${MODEL_PATH_SRC}:/src/
-      # - ${MODEL_PATH_SRC}:/src/data/models
     ports:
       - "8010:8010"
+    volumes:
+      - ./src/models:/src/models
     env_file:
       - .env
