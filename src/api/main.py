@@ -174,17 +174,44 @@ def run_fraud_prediction(req: TransactionRequest):
 
         df = pd.DataFrame([txn]) if txn else pd.DataFrame([{**req.dict(), "created_at": datetime.utcnow()}])
 
+        for col in ["refunded", "disputed", "transaction_id"]:
+            if col not in df.columns:
+                df[col] = False
+
         df.loc[0, ["amount", "risk_score", "hour", "card_country", "billing_address_country",
-                  "email", "ip_address", "fingerprint"]] = [
+                   "email", "ip_address", "fingerprint"]] = [
             req.amount, req.risk_score, req.hour, req.card_country,
             req.billing_country, req.email, req.ip_address, req.fingerprint
         ]
-        df["created_at"] = datetime.utcnow()
+        df["created_at"] = pd.to_datetime(datetime.utcnow())
 
         df["amount_log"] = np.log1p(df["amount"])
         df["country_mismatch"] = (df["card_country"] != df["billing_address_country"]).astype(int)
         df["email_domain_risk"] = df["email"].apply(
-            lambda x: 1 if x.split("@")[1] in ["gmail.com", "yahoo.com", "hotmail.com"] else 0)
+            lambda x: 1 if x.split("@")[1] in ["gmail.com", "yahoo.com", "hotmail.com"] else 0
+        )
+
+        df["ip_address_reuse_count"] = df.groupby("ip_address")["fingerprint"].transform("count")
+        df["device_fingerprint_reuse_count"] = df.groupby("fingerprint")["transaction_id"].transform("count")
+        df["device_ip_pair_reuse_count"] = df.groupby(["fingerprint", "ip_address"])["transaction_id"].transform("count")
+        df["ip_address_country_mismatch"] = (df["card_country"] != df["ip_address"]).astype(int)
+
+        df["email_transaction_count"] = df.groupby("email")["transaction_id"].transform("count")
+        df["email_dispute_count"] = df.groupby("email")["disputed"].transform("sum")
+        df["email_refund_count"] = df.groupby("email")["refunded"].transform("sum")
+        df["chargeback_rate"] = df["email_dispute_count"] / df["email_transaction_count"]
+        df["email_avg_amount"] = df.groupby("email")["amount"].transform("mean")
+
+        df["unusual_amount_flag"] = (df["amount"] > df["amount"].quantile(0.99)).astype(int)
+        df["time_between_transactions"] = df.groupby("email")["created_at"].diff().dt.total_seconds().fillna(999999)
+        df["first_time_transaction"] = (df["email_transaction_count"] == 1).astype(int)
+        df["customer_avg_amount_diff"] = abs(df["amount"] - df["email_avg_amount"])
+        df["customer_last_transaction_diff"] = df.groupby("email")["amount"].diff().abs().fillna(0)
+        df["customer_refund_ratio"] = df["email_refund_count"] / df["email_transaction_count"]
+        df["shared_card_email_count"] = df.groupby("fingerprint")["email"].transform("nunique")
+        df["shared_ip_email_count"] = df.groupby("ip_address")["email"].transform("nunique")
+        df["previous_risk_scores_avg"] = df.groupby("email")["risk_score"].transform("mean")
+        df["number_of_risky_transactions"] = df.groupby("email")["risk_score"].transform(lambda x: (x > 50).sum())
 
         for col in fraud_features:
             if col not in df.columns:
@@ -196,9 +223,32 @@ def run_fraud_prediction(req: TransactionRequest):
         proba = fraud_model.predict_proba(X_scaled)[0][1]
 
         reasons = []
-        if req.amount > 5000: reasons.append("Unusually high amount")
-        if df["country_mismatch"].iloc[0]: reasons.append("Country mismatch")
-        if df["email_domain_risk"].iloc[0]: reasons.append("Public email domain")
+
+        rules = [
+            (req.amount > 5000, "Unusually high transaction amount"),
+            (df.get("unusual_amount_flag", pd.Series([0])).iloc[0] == 1, "Amount falls in top 1% of all transactions"),
+            (df.get("country_mismatch", pd.Series([0])).iloc[0] == 1, "Card and billing country mismatch"),
+            (df.get("ip_address_country_mismatch", pd.Series([0])).iloc[0] == 1, "Card country and IP address mismatch"),
+            (df.get("ip_address_reuse_count", pd.Series([0])).iloc[0] > 5, "IP address reused across multiple transactions"),
+            (df.get("device_fingerprint_reuse_count", pd.Series([0])).iloc[0] > 3, "Device fingerprint reused for many transactions"),
+            (df.get("device_ip_pair_reuse_count", pd.Series([0])).iloc[0] > 3, "Same device-IP pair used repeatedly"),
+            (df.get("shared_card_email_count", pd.Series([0])).iloc[0] > 2, "Same card used by multiple email accounts"),
+            (df.get("shared_ip_email_count", pd.Series([0])).iloc[0] > 2, "Same IP address linked to multiple email accounts"),
+            (df.get("email_domain_risk", pd.Series([0])).iloc[0] == 1, "Email uses public domain (e.g. Gmail/Yahoo)"),
+            (df.get("customer_refund_ratio", pd.Series([0.0])).iloc[0] > 0.3, "High refund ratio for this customer"),
+            (df.get("chargeback_rate", pd.Series([0.0])).iloc[0] > 0.2, "Frequent chargebacks by this customer"),
+            (df.get("time_between_transactions", pd.Series([999999])).iloc[0] < 30, "Rapid repeat transaction (< 30s)"),
+            (df.get("first_time_transaction", pd.Series([0])).iloc[0] == 1, "First-time transaction for this email"),
+            (df.get("customer_avg_amount_diff", pd.Series([0.0])).iloc[0] > 100, "Transaction amount differs significantly from customer's average"),
+            (df.get("customer_last_transaction_diff", pd.Series([0.0])).iloc[0] > 100, "Large difference from previous transaction amount"),
+            (df.get("previous_risk_scores_avg", pd.Series([0.0])).iloc[0] > 70, "Historically high risk scores"),
+            (df.get("number_of_risky_transactions", pd.Series([0])).iloc[0] > 3, "Customer has multiple past high-risk transactions"),
+            (df.get("risk_score", pd.Series([0])).iloc[0] > 70, "High Stripe risk score")
+        ]
+
+        for condition, reason in rules:
+            if condition:
+                reasons.append(reason)
 
         return {
             "fraud_detected": bool(pred),
