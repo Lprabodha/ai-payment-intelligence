@@ -11,21 +11,18 @@ from tensorflow.keras.models import load_model
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
-# ----------------- Load Configs -----------------
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 MODEL_PATH = "/src/data/models/"
 
-# ----------------- Init -----------------
 stripe.api_key = STRIPE_SECRET_KEY
 client = MongoClient(MONGO_URI)
 db = client["payment_intelligence"]
 app = FastAPI(title="AI Payment Intelligence API")
 router = APIRouter()
 
-# ----------------- Load Models -----------------
 def load_ai_model(name):
     path = os.path.join(MODEL_PATH, name)
     return joblib.load(path) if os.path.exists(path) else None
@@ -42,7 +39,6 @@ smart_routing_model = load_model(os.path.join(MODEL_PATH, "smart_payment_routing
 with open(os.path.join(MODEL_PATH, "fraud_detection_metadata.json")) as f:
     fraud_features = json.load(f)["features_used"]
 
-# ----------------- Utils -----------------
 def sanitize_for_mongo(obj):
     if isinstance(obj, dict):
         return {k: sanitize_for_mongo(v) for k, v in obj.items()}
@@ -60,7 +56,6 @@ def classify_risk_level(confidence, high=0.85, medium=0.5):
     elif confidence >= medium: return "medium"
     return "low"
 
-# ----------------- Schemas -----------------
 class TransactionRequest(BaseModel):
     amount: float
     card_country: str
@@ -71,7 +66,6 @@ class TransactionRequest(BaseModel):
     fingerprint: str
     hour: int
 
-# ----------------- Routes -----------------
 @app.get("/")
 def root(): return {"message": "🤖 AI Payment Intelligence API"}
 
@@ -125,7 +119,6 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks, st
 
     return {"status": f"Ignored event: {event['type']}"}
 
-# ----------------- Workflow & Prediction -----------------
 def process_fraud_workflow(transaction):
     try:
         print("🚀 Running fraud check for:", transaction["transaction_id"])
@@ -218,7 +211,6 @@ def run_fraud_prediction(req: TransactionRequest):
         print("❌ Prediction error:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-# ----------------- API Prediction Routes -----------------
 @app.post("/predict/fraud")
 def predict_fraud(req: TransactionRequest):
     try:

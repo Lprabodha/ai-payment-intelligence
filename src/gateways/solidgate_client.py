@@ -11,8 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 load_dotenv()
 
-API_KEY = os.getenv("SOLIDGATE_API_KEY")     # public key (merchant)
-API_SECRET = os.getenv("SOLIDGATE_API_SECRET")  # secret key (signing)
+API_KEY = os.getenv("SOLIDGATE_API_KEY")
+API_SECRET = os.getenv("SOLIDGATE_API_SECRET")
 MONGO_URI = os.getenv("MONGO_URI")
 
 mongo_client = MongoClient(MONGO_URI)
