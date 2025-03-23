@@ -1,49 +1,66 @@
 import os
+import json
 import joblib
+import stripe
 import numpy as np
-from fastapi import FastAPI, HTTPException
-from fastapi import APIRouter
+import pandas as pd
+from fastapi import FastAPI, HTTPException, Request, Header, BackgroundTasks, APIRouter
 from pydantic import BaseModel
 from datetime import datetime
 from tensorflow.keras.models import load_model
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
+# ----------------- Load Configs -----------------
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
-
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client['payment_intelligence']
-
-router = APIRouter()
-app = FastAPI(title="AI Payment Intelligence API")
-
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 MODEL_PATH = "/src/data/models/"
 
-def load_ai_model(model_name):
-    model_file = os.path.join(MODEL_PATH, model_name)
-    if os.path.exists(model_file):
-        return joblib.load(model_file)
-    else:
-        print(f"⚠️ Warning: {model_file} not found!")
-        return None  # Avoid crashing FastAPI if model is missing
+# ----------------- Init -----------------
+stripe.api_key = STRIPE_SECRET_KEY
+client = MongoClient(MONGO_URI)
+db = client["payment_intelligence"]
+app = FastAPI(title="AI Payment Intelligence API")
+router = APIRouter()
+
+# ----------------- Load Models -----------------
+def load_ai_model(name):
+    path = os.path.join(MODEL_PATH, name)
+    return joblib.load(path) if os.path.exists(path) else None
 
 fraud_model = load_ai_model("fraud_detection_model_final.pkl")
 fraud_scaler = load_ai_model("fraud_detection_scaler_final.pkl")
-
 chargeback_model = load_ai_model("chargeback_prediction_model.pkl")
 chargeback_scaler = load_ai_model("chargeback_prediction_scaler.pkl")
-
-subscription_model = load_ai_model("subscription_revenue_forecasting_model.pkl")
+subscription_model = load_ai_model("subscription_revenue_model.pkl")
 subscription_scaler = load_ai_model("subscription_revenue_scaler.pkl")
+smart_routing_model = load_model(os.path.join(MODEL_PATH, "smart_payment_routing_model.h5")) \
+    if os.path.exists(os.path.join(MODEL_PATH, "smart_payment_routing_model.h5")) else None
 
-smart_routing_model_path = os.path.join(MODEL_PATH, "smart_payment_routing_model.h5")
-if os.path.exists(smart_routing_model_path):
-    smart_routing_model = load_model(smart_routing_model_path)
-else:
-    print(f"⚠️ Warning: {smart_routing_model_path} not found!")
-    smart_routing_model = None
+with open(os.path.join(MODEL_PATH, "fraud_detection_metadata.json")) as f:
+    fraud_features = json.load(f)["features_used"]
 
+# ----------------- Utils -----------------
+def sanitize_for_mongo(obj):
+    if isinstance(obj, dict):
+        return {k: sanitize_for_mongo(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_for_mongo(i) for i in obj]
+    elif isinstance(obj, (np.integer, int)): return int(obj)
+    elif isinstance(obj, (np.floating, float)): return float(obj)
+    elif isinstance(obj, (np.bool_, bool)): return bool(obj)
+    elif isinstance(obj, datetime): return obj
+    elif isinstance(obj, str): return obj
+    else: return str(obj)
+
+def classify_risk_level(confidence, high=0.85, medium=0.5):
+    if confidence >= high: return "high"
+    elif confidence >= medium: return "medium"
+    return "low"
+
+# ----------------- Schemas -----------------
 class TransactionRequest(BaseModel):
     amount: float
     card_country: str
@@ -54,50 +71,214 @@ class TransactionRequest(BaseModel):
     fingerprint: str
     hour: int
 
-
+# ----------------- Routes -----------------
 @app.get("/")
-def root():
-    return {"message": "AI Payment Intelligence API!"}
+def root(): return {"message": "🤖 AI Payment Intelligence API"}
 
-@router.post("/predict/fraud")
+@app.get("/health")
+def health(): return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+@app.post("/webhook/stripe")
+async def stripe_webhook(request: Request, background_tasks: BackgroundTasks, stripe_signature: str = Header(None)):
+    try:
+        payload = await request.body()
+        event = stripe.Webhook.construct_event(payload, stripe_signature, WEBHOOK_SECRET)
+        print("✅ Stripe event:", event["type"])
+    except Exception as e:
+        print("❌ Signature error:", e)
+        return {"error": str(e)}
+
+    if event["type"] == "invoice.paid":
+        try:
+            invoice = event["data"]["object"]
+            charge_id = invoice.get("charge")
+            charge = stripe.Charge.retrieve(charge_id) if charge_id else {}
+
+            billing = charge.get("billing_details", {})
+            card = charge.get("payment_method_details", {}).get("card", {})
+            outcome = charge.get("outcome", {})
+
+            transaction = {
+                "invoice_id": invoice["id"],
+                "subscription_id": invoice.get("subscription"),
+                "transaction_id": charge_id,
+                "email": invoice.get("customer_email", "unknown@example.com"),
+                "amount": invoice.get("amount_paid", 0) / 100.0,
+                "currency": invoice.get("currency", "usd"),
+                "gateway": "Stripe",
+                "status": invoice.get("status"),
+                "fingerprint": card.get("fingerprint", "unknown"),
+                "card_country": card.get("country", "unknown"),
+                "risk_score": outcome.get("risk_score", 50),
+                "billing_address_country": billing.get("address", {}).get("country", "unknown"),
+                "ip_address": billing.get("address", {}).get("country", "unknown"),
+                "created_at": datetime.utcnow()
+            }
+
+            print("📦 Transaction:", transaction)
+            background_tasks.add_task(process_fraud_workflow, transaction)
+            return {"status": "queued", "invoice_id": invoice["id"]}
+
+        except Exception as e:
+            print("❌ invoice.paid error:", e)
+            return {"error": str(e)}
+
+    return {"status": f"Ignored event: {event['type']}"}
+
+# ----------------- Workflow & Prediction -----------------
+def process_fraud_workflow(transaction):
+    try:
+        print("🚀 Running fraud check for:", transaction["transaction_id"])
+        db["transactions"].insert_one(sanitize_for_mongo(transaction))
+
+        model_input = TransactionRequest(**{
+            "amount": transaction["amount"],
+            "card_country": transaction["card_country"],
+            "billing_country": transaction["billing_address_country"],
+            "email": transaction["email"],
+            "risk_score": transaction["risk_score"],
+            "ip_address": transaction["ip_address"],
+            "fingerprint": transaction["fingerprint"],
+            "hour": datetime.utcnow().hour
+        })
+
+        prediction = run_fraud_prediction(model_input)
+        confidence = float(prediction["confidence"])
+        risk_level = classify_risk_level(confidence)
+
+        result_doc = {
+            "transaction_id": transaction["transaction_id"],
+            "email": transaction["email"],
+            "fraud_prediction": {
+                "detected": bool(prediction["fraud_detected"]),
+                "confidence_score": confidence,
+                "risk_level": risk_level,
+                "reasons": prediction["reasons"],
+                "thresholds": {"high_risk": 0.85, "medium_risk": 0.5}
+            },
+            "features_used": sanitize_for_mongo(prediction["features_used"]),
+            "model_info": {
+                "name": "fraud_detection_model_final.pkl",
+                "version": "v1.0",
+                "run_time": datetime.utcnow().isoformat()
+            },
+            "created_at": datetime.utcnow()
+        }
+
+        db["fraud_results"].insert_one(result_doc)
+        print("✅ Improved fraud result saved.")
+
+    except Exception as e:
+        print("❌ Fraud processing failed:", e)
+
+
+def run_fraud_prediction(req: TransactionRequest):
+    try:
+        txn = db["transactions"].find_one(
+            {"email": req.email, "ip_address": req.ip_address, "fingerprint": req.fingerprint},
+            sort=[("created_at", -1)]
+        )
+
+        df = pd.DataFrame([txn]) if txn else pd.DataFrame([{**req.dict(), "created_at": datetime.utcnow()}])
+
+        df.loc[0, ["amount", "risk_score", "hour", "card_country", "billing_address_country",
+                  "email", "ip_address", "fingerprint"]] = [
+            req.amount, req.risk_score, req.hour, req.card_country,
+            req.billing_country, req.email, req.ip_address, req.fingerprint
+        ]
+        df["created_at"] = datetime.utcnow()
+
+        df["amount_log"] = np.log1p(df["amount"])
+        df["country_mismatch"] = (df["card_country"] != df["billing_address_country"]).astype(int)
+        df["email_domain_risk"] = df["email"].apply(
+            lambda x: 1 if x.split("@")[1] in ["gmail.com", "yahoo.com", "hotmail.com"] else 0)
+
+        for col in fraud_features:
+            if col not in df.columns:
+                df[col] = 0
+
+        X = df[fraud_features].replace("unknown", 0).apply(pd.to_numeric, errors="coerce").fillna(0)
+        X_scaled = fraud_scaler.transform(X)
+        pred = fraud_model.predict(X_scaled)[0]
+        proba = fraud_model.predict_proba(X_scaled)[0][1]
+
+        reasons = []
+        if req.amount > 5000: reasons.append("Unusually high amount")
+        if df["country_mismatch"].iloc[0]: reasons.append("Country mismatch")
+        if df["email_domain_risk"].iloc[0]: reasons.append("Public email domain")
+
+        return {
+            "fraud_detected": bool(pred),
+            "confidence": round(proba, 4),
+            "reasons": reasons,
+            "features_used": {k: float(X.iloc[0][k]) for k in fraud_features}
+        }
+
+    except Exception as e:
+        print("❌ Prediction error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------- API Prediction Routes -----------------
+@app.post("/predict/fraud")
 def predict_fraud(req: TransactionRequest):
-    if fraud_model is None or fraud_scaler is None:
-        raise HTTPException(status_code=500, detail="Fraud model is missing!")
-    
-    X = fraud_scaler.transform([[req.amount, req.risk_score, req.hour]])
-    prediction = fraud_model.predict(X)[0]
-    return {"fraud_detected": bool(prediction)}
+    try:
+        return run_fraud_prediction(req)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/predict/chargeback")
 def predict_chargeback(req: TransactionRequest):
-    if chargeback_model is None or chargeback_scaler is None:
-        raise HTTPException(status_code=500, detail="Chargeback model is missing!")
-    
-    X = chargeback_scaler.transform([[req.amount, req.risk_score, req.hour]])
-    prediction = chargeback_model.predict(X)[0]
-    return {"chargeback_likelihood": float(prediction)}
+    if not chargeback_model or not chargeback_scaler:
+        raise HTTPException(500, "Chargeback model unavailable")
+    try:
+        X = chargeback_scaler.transform([[req.amount, req.risk_score, req.hour]])
+        pred = chargeback_model.predict(X)[0]
+        proba = chargeback_model.predict_proba(X)[0][1]
+        return {
+            "chargeback_predicted": bool(pred),
+            "confidence_score": round(proba, 4),
+            "explanations": [
+                "High internal risk score" if req.risk_score > 60 else "",
+                "High transaction amount" if req.amount > 500 else ""
+            ],
+            "features_used": req.dict()
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 @router.post("/predict/subscription_revenue")
 def predict_subscription_revenue(req: TransactionRequest):
-    if subscription_model is None or subscription_scaler is None:
-        raise HTTPException(status_code=500, detail="Subscription model is missing!")
-    
-    X = subscription_scaler.transform([[req.amount, req.risk_score, req.hour]])
-    revenue = subscription_model.predict(X)[0]
-    return {"expected_revenue": float(revenue)}
+    if not subscription_model or not subscription_scaler:
+        raise HTTPException(500, "Subscription model unavailable")
+    try:
+        X = subscription_scaler.transform([[req.amount, req.risk_score, req.hour]])
+        revenue = subscription_model.predict(X)[0]
+        return {
+            "expected_next_revenue": round(float(revenue), 2),
+            "customer_signal": {
+                "high_risk_score": req.risk_score > 60,
+                "transaction_hour": req.hour
+            },
+            "note": "Predicted using historical subscription patterns"
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 @router.post("/predict/payment_gateway")
 def predict_payment_gateway(req: TransactionRequest):
-    if smart_routing_model is None:
-        raise HTTPException(status_code=500, detail="Smart Payment Routing model is missing!")
-
-    X = np.array([req.amount, req.risk_score, req.hour]).reshape(1, -1)
-    gateway_idx = np.argmax(smart_routing_model.predict(X, verbose=0)[0])
-    gateway_map = {0: "Stripe", 1: "PayPal", 2: "Adyen"}
-    return {"recommended_gateway": gateway_map[gateway_idx]}
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
-
-app.include_router(router)
+    if not smart_routing_model:
+        raise HTTPException(500, "Smart routing model unavailable")
+    try:
+        X = np.array([[req.amount, req.risk_score, req.hour]])
+        predictions = smart_routing_model.predict(X, verbose=0)[0]
+        idx = int(np.argmax(predictions))
+        return {
+            "recommended_gateway": ["Stripe", "PayPal", "Adyen"][idx],
+            "confidence_scores": {
+                "Stripe": round(float(predictions[0]), 4),
+                "PayPal": round(float(predictions[1]), 4),
+                "Adyen": round(float(predictions[2]), 4)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))

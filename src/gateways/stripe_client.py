@@ -19,7 +19,8 @@ transactions_collection = db['transactions']
 
 def fetch_and_store_customers_by_email():
     print("Fetching Stripe customers...")
-    customers = stripe.Customer.list(limit=100)
+    customers = list(stripe.Customer.list(limit=100).auto_paging_iter())
+    customers = sorted(customers, key=lambda x: x['created'], reverse=True)[:7] 
     
     for customer in customers.auto_paging_iter():
         email = customer['email'] or 'unknown@example.com' 
@@ -70,7 +71,8 @@ def fetch_and_store_subscriptions_by_email():
         if not stripe_customer_id:
             continue  
 
-        subscriptions = stripe.Subscription.list(customer=stripe_customer_id, limit=100)
+        subscriptions = list(stripe.Subscription.list(customer=stripe_customer_id, limit=100).auto_paging_iter())
+        subscriptions = sorted(subscriptions, key=lambda s: s['created'], reverse=True)[:7]
 
         for sub in subscriptions.auto_paging_iter():
             sub_id = sub['id']
@@ -131,7 +133,8 @@ def fetch_and_store_transactions_by_email():
         if not stripe_customer_id:
             continue  
 
-        charges = stripe.Charge.list(customer=stripe_customer_id, limit=100)
+        charges = list(stripe.Charge.list(customer=stripe_customer_id, limit=100).auto_paging_iter())
+        charges = sorted(charges, key=lambda c: c['created'], reverse=True)[:7]
 
         for charge in charges.auto_paging_iter():
             transaction_id = charge['id']
