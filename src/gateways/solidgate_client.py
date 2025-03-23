@@ -24,26 +24,31 @@ transactions_collection = db['transactions']
 SOLIDGATE_API_BASE = "https://reports.solidgate.com/api/v1"
 
 
-def generate_signature(payload_json):
-    message = base64.b64encode(payload_json.encode())
-    return hmac.new(API_SECRET.encode(), message, hashlib.sha512).hexdigest()
-
+def generate_signature(public_key, payload_json, secret_key):
+    data = public_key + payload_json + public_key
+    hmac_digest = hmac.new(secret_key.encode('utf-8'), data.encode('utf-8'), hashlib.sha512).digest()
+    return base64.b64encode(hmac_digest).decode('utf-8')
 
 def solidgate_post(endpoint, data):
     payload_json = json.dumps(data, separators=(',', ':'), sort_keys=True)
+    signature = generate_signature(API_KEY, payload_json, API_SECRET)
+
     headers = {
         "Content-Type": "application/json",
         "merchant": API_KEY,
-        "signature": generate_signature(payload_json)
+        "signature": signature
     }
+
     url = f"{SOLIDGATE_API_BASE}{endpoint}"
+
     response = requests.post(url, data=payload_json, headers=headers)
+
     try:
         response.raise_for_status()
         return response.json()
     except requests.exceptions.HTTPError:
         print("❌ Solidgate Error:", response.status_code, response.text)
-        return {}
+        return response.json()
 
 
 def parse_datetime(dt_str):
@@ -56,7 +61,7 @@ def parse_datetime(dt_str):
 def fetch_and_store_solidgate_orders():
     print("\n🔄 Fetching Solidgate orders...")
     now = datetime.utcnow()
-    from_date = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+    from_date = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
     to_date = now.strftime("%Y-%m-%d %H:%M:%S")
 
     data = {
@@ -67,23 +72,38 @@ def fetch_and_store_solidgate_orders():
     }
 
     result = solidgate_post("/card-orders", data)
-    for order in result.get('orders', []):
-        transaction_id = order.get('order_id')
-        if not transaction_id or transactions_collection.find_one({"transaction_id": transaction_id}):
+    orders = result.get('orders')
+
+    print(result)
+    
+    if not orders:
+        print("❌ No orders found in Solidgate response.")
+        return
+
+    for order in orders:
+        transaction_id = order.get('transactions', [{}])[0].get('id')
+        if not transaction_id:
+            print("⚠️ Skipping transaction with missing ID")
             continue
+
+        if transactions_collection.find_one({"transaction_id": transaction_id}):
+            print(f"ℹ️ Transaction {transaction_id} already exists. Skipping.")
+            continue
+
+        card = order.get("transactions", [{}])[0].get("card", {})
 
         transaction = {
             "transaction_id": transaction_id,
             "email": order.get("customer_email", "unknown@example.com"),
             "amount": float(order.get("amount", 0)) / 100,
-            "currency": order.get("customer_currency", order.get("currency", "usd")).lower(),
+            "currency": order.get("processing_currency", order.get("currency", "usd")).lower(),
             "gateway": "Solidgate",
             "status": order.get("status"),
             "payment_method": order.get("payment_type", "unknown"),
-            "card_brand": None,
-            "card_country": None,
-            "fingerprint": None,
-            "funding_type": None,
+            "card_brand": card.get("brand"),
+            "card_country": card.get("country"),
+            "fingerprint": card.get("card_id"),
+            "funding_type": card.get("card_type", "").lower(),
             "three_d_secure": None,
             "cvc_check": None,
             "address_line1_check": None,
@@ -94,7 +114,7 @@ def fetch_and_store_solidgate_orders():
             "network_status": None,
             "outcome_type": None,
             "ip_address": order.get("ip_address", "unknown"),
-            "billing_name": None,
+            "billing_name": card.get("card_holder"),
             "billing_email": order.get("customer_email", None),
             "billing_phone": None,
             "billing_address_country": order.get("geo_country"),
@@ -111,18 +131,11 @@ def fetch_and_store_solidgate_orders():
             "created_at": parse_datetime(order.get("created_at"))
         }
 
-        if order.get("transactions"):
-            card = order["transactions"][0].get("card", {})
-            transaction.update({
-                "card_brand": card.get("brand"),
-                "card_country": card.get("country"),
-                "funding_type": card.get("card_type", "").lower(),
-                "billing_name": card.get("card_holder"),
-                "fingerprint": card.get("card_id", None)
-            })
-
-        transactions_collection.insert_one(transaction)
-        print(f"✅ Stored transaction: {transaction_id}")
+        try:
+            result = transactions_collection.insert_one(transaction)
+            print(f"✅ Inserted transaction {transaction_id} with _id: {result.inserted_id}")
+        except Exception as e:
+            print(f"❌ Failed to insert transaction {transaction_id}: {e}")
 
 
 def fetch_and_store_solidgate_subscriptions():
