@@ -6,10 +6,10 @@ services:
       context: .
       dockerfile: ./docker/Dockerfile
     container_name: ai-payment-intelligence-app
-    # command: python ./src/ai_models/fraud_detection.py
+    command: bash /src/entrypoint.sh
     volumes:
       - ${MODEL_PATH_SRC}:/src/
-      # - ${MODEL_PATH_SRC}:/src/data/models
+      - ./docker/entrypoint.sh:/src/entrypoint.sh
     ports:
       - "8010:8010"
     env_file:
