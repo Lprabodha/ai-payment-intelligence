@@ -137,6 +137,7 @@ plt.title("Feature Importances")
 plt.bar(range(len(importances)), importances[indices])
 plt.xticks(range(len(importances)), [features[i] for i in indices], rotation=90)
 plt.tight_layout()
+plt.savefig("/src/data/models/fraud_detection.png")
 plt.show()
 
 os.makedirs("/src/data/models", exist_ok=True)
