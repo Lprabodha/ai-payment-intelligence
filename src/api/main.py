@@ -82,7 +82,91 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks, st
         print("❌ Signature error:", e)
         return {"error": str(e)}
 
-    if event["type"] == "invoice.paid":
+    if event_type == "customer.created":
+        customer_data = {
+            "email": obj.get("email"),
+            "name": obj.get("name"),
+            "phone": obj.get("phone"),
+            "currency": obj.get("currency"),
+            "country": obj.get("address", {}).get("country"),
+            "address_line1": obj.get("address", {}).get("line1"),
+            "address_line2": obj.get("address", {}).get("line2"),
+            "city": obj.get("address", {}).get("city"),
+            "state": obj.get("address", {}).get("state"),
+            "postal_code": obj.get("address", {}).get("postal_code"),
+            "created_at": datetime.utcfromtimestamp(obj.get("created")),
+            "delinquent": obj.get("delinquent", False),
+            "default_payment_method": obj.get("invoice_settings", {}).get("default_payment_method"),
+            "balance": obj.get("balance", 0),
+            "tax_info": obj.get("tax_info", {}),
+            "metadata": obj.get("metadata", {}),
+            "invoice_prefix": obj.get("invoice_prefix"),
+            "gateway_customer_ids": {"stripe": obj.get("id")}
+        }
+        db["customers"].update_one({"email": customer_data["email"]}, {"$set": customer_data}, upsert=True)
+        print(f"✅ Customer saved: {customer_data['email']}")
+
+    elif event_type == "customer.subscription.created":
+        sub = obj
+        items = sub.get("items", {}).get("data", [])
+        plan = items[0].get("plan", {}) if items else {}
+        sub_data = {
+            "subscription_id": sub.get("id"),
+            "email": sub.get("metadata", {}).get("user_email", "unknown@example.com"),
+            "gateway": "Stripe",
+            "status": sub.get("status"),
+            "current_period_start": datetime.utcfromtimestamp(sub.get("current_period_start")),
+            "current_period_end": datetime.utcfromtimestamp(sub.get("current_period_end")),
+            "plan_id": plan.get("id"),
+            "plan_name": plan.get("nickname"),
+            "product_id": plan.get("product"),
+            "price_amount": plan.get("amount", 0) / 100.0,
+            "currency": plan.get("currency"),
+            "interval": plan.get("interval"),
+            "created_at": datetime.utcfromtimestamp(sub.get("created")),
+            "cancel_at_period_end": sub.get("cancel_at_period_end"),
+            "canceled_at": datetime.utcfromtimestamp(sub.get("canceled_at")) if sub.get("canceled_at") else None,
+            "ended_at": datetime.utcfromtimestamp(sub.get("ended_at")) if sub.get("ended_at") else None,
+            "trial_start": datetime.utcfromtimestamp(sub.get("trial_start")) if sub.get("trial_start") else None,
+            "trial_end": datetime.utcfromtimestamp(sub.get("trial_end")) if sub.get("trial_end") else None,
+            "quantity": sub.get("quantity"),
+            "metadata": sub.get("metadata"),
+            "latest_invoice": sub.get("latest_invoice"),
+            "collection_method": sub.get("collection_method"),
+            "default_payment_method": sub.get("default_payment_method"),
+            "billing_cycle_anchor": datetime.utcfromtimestamp(sub.get("billing_cycle_anchor")) if sub.get("billing_cycle_anchor") else None
+        }
+        db["subscriptions"].update_one({"subscription_id": sub_data["subscription_id"]}, {"$set": sub_data}, upsert=True)
+        print(f"✅ Subscription created: {sub_data['subscription_id']}")
+
+    elif event_type == "customer.subscription.deleted":
+        sub_id = obj.get("id")
+        db["subscriptions"].update_one({"subscription_id": sub_id}, {"$set": {
+            "status": "canceled",
+            "canceled_at": datetime.utcnow(),
+            "ended_at": datetime.utcnow()
+        }})
+        print(f"🚫 Subscription canceled: {sub_id}")
+
+    elif event_type == "refund.created":
+        charge_id = obj.get("charge")
+        db["transactions"].update_one({"transaction_id": charge_id}, {"$set": {
+            "refunded": True,
+            "amount_refunded": obj.get("amount", 0) / 100.0,
+            "refund_created_at": datetime.utcfromtimestamp(obj.get("created"))
+        }})
+        print(f"💸 Refund created for transaction: {charge_id}")
+
+    elif event_type == "charge.dispute.closed":
+        charge_id = obj.get("charge")
+        db["transactions"].update_one({"transaction_id": charge_id}, {"$set": {
+            "disputed": True,
+            "dispute_status": "closed",
+            "dispute_closed_at": datetime.utcnow()
+        }})
+        print(f"⚠️ Dispute closed for transaction: {charge_id}")
+
+    elif event_type == "invoice.paid":
         try:
             invoice = event["data"]["object"]
             charge_id = invoice.get("charge")
