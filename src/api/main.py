@@ -82,21 +82,26 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks, st
         print("❌ Signature error:", e)
         return {"error": str(e)}
 
+    event_type = event["type"]
+    obj = event["data"]["object"] 
+
     if event_type == "customer.created":
+        address = obj.get("address") or {}
+        invoice_settings = obj.get("invoice_settings") or {}
         customer_data = {
             "email": obj.get("email"),
             "name": obj.get("name"),
             "phone": obj.get("phone"),
             "currency": obj.get("currency"),
-            "country": obj.get("address", {}).get("country"),
-            "address_line1": obj.get("address", {}).get("line1"),
-            "address_line2": obj.get("address", {}).get("line2"),
-            "city": obj.get("address", {}).get("city"),
-            "state": obj.get("address", {}).get("state"),
-            "postal_code": obj.get("address", {}).get("postal_code"),
+            "country": address.get("country"),
+            "address_line1": address.get("line1"),
+            "address_line2": address.get("line2"),
+            "city": address.get("city"),
+            "state": address.get("state"),
+            "postal_code": address.get("postal_code"),
             "created_at": datetime.utcfromtimestamp(obj.get("created")),
             "delinquent": obj.get("delinquent", False),
-            "default_payment_method": obj.get("invoice_settings", {}).get("default_payment_method"),
+            "default_payment_method": invoice_settings.get("default_payment_method"),
             "balance": obj.get("balance", 0),
             "tax_info": obj.get("tax_info", {}),
             "metadata": obj.get("metadata", {}),
@@ -168,7 +173,7 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks, st
 
     elif event_type == "invoice.paid":
         try:
-            invoice = event["data"]["object"]
+            invoice = obj
             charge_id = invoice.get("charge")
             charge = stripe.Charge.retrieve(charge_id) if charge_id else {}
 
@@ -177,31 +182,72 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks, st
             outcome = charge.get("outcome", {})
 
             transaction = {
-                "invoice_id": invoice["id"],
-                "subscription_id": invoice.get("subscription"),
                 "transaction_id": charge_id,
                 "email": invoice.get("customer_email", "unknown@example.com"),
                 "amount": invoice.get("amount_paid", 0) / 100.0,
                 "currency": invoice.get("currency", "usd"),
                 "gateway": "Stripe",
-                "status": invoice.get("status"),
-                "fingerprint": card.get("fingerprint", "unknown"),
-                "card_country": card.get("country", "unknown"),
-                "risk_score": outcome.get("risk_score", 50),
-                "billing_address_country": billing.get("address", {}).get("country", "unknown"),
-                "ip_address": billing.get("address", {}).get("country", "unknown"),
-                "created_at": datetime.utcnow()
+                "status": invoice.get("status", charge.get("status", "unknown")),
+
+                # Payment method
+                "payment_method": charge.get("payment_method_details", {}).get("type"),
+                "card_brand": card.get("brand"),
+                "card_country": card.get("country"),
+                "fingerprint": card.get("fingerprint"),
+                "funding_type": card.get("funding"),
+                "three_d_secure": card.get("three_d_secure"),
+                "cvc_check": card.get("checks", {}).get("cvc_check"),
+                "address_line1_check": card.get("checks", {}).get("address_line1_check"),
+                "postal_code_check": card.get("checks", {}).get("address_postal_code_check"),
+
+                # Risk info
+                "risk_level": outcome.get("risk_level", "unknown"),
+                "risk_score": outcome.get("risk_score", 0),
+                "seller_message": outcome.get("seller_message"),
+                "network_status": outcome.get("network_status"),
+                "outcome_type": outcome.get("type"),
+
+                # Billing & IP
+                "ip_address": card.get("country") or billing.get("address", {}).get("country", "unknown"),
+                "billing_name": billing.get("name"),
+                "billing_email": billing.get("email"),
+                "billing_phone": billing.get("phone"),
+                "billing_address_country": billing.get("address", {}).get("country"),
+                "billing_address_line1": billing.get("address", {}).get("line1"),
+                "billing_address_line2": billing.get("address", {}).get("line2"),
+                "billing_address_postal_code": billing.get("address", {}).get("postal_code"),
+                "billing_address_city": billing.get("address", {}).get("city"),
+                "billing_address_state": billing.get("address", {}).get("state"),
+                "refunded": charge.get("refunded", False),
+                "amount_refunded": charge.get("amount_refunded", 0) / 100.0,
+                "disputed": charge.get("disputed", False),
+                "captured": charge.get("captured", False),
+                "paid": charge.get("paid", False),
+                "created_at": datetime.utcfromtimestamp(charge.get("created")) if charge.get("created") else datetime.utcnow()
             }
 
-            print("📦 Transaction:", transaction)
+            result = db["transactions"].update_one(
+                {"transaction_id": transaction["transaction_id"]},
+                {"$set": transaction},
+                upsert=True)
+            if result.matched_count:
+                print(f"🔁 Updated existing transaction: {transaction['transaction_id']}")
+            else:
+                print(f"🆕 Inserted new transaction: {transaction['transaction_id']}")
+
             background_tasks.add_task(process_fraud_workflow, transaction)
             return {"status": "queued", "invoice_id": invoice["id"]}
 
         except Exception as e:
             print("❌ invoice.paid error:", e)
+            raise HTTPException(status_code=500, detail=f"invoice.paid error: {str(e)}")
+
+        except Exception as e:
+            print("❌ invoice.paid error:", e)
             return {"error": str(e)}
 
-    return {"status": f"Ignored event: {event['type']}"}
+    return {"status": f"Ignored event: {event_type}"}
+
 
 def process_fraud_workflow(transaction):
     try:
