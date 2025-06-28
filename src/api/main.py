@@ -561,24 +561,6 @@ def predict_and_store_chargeback(transaction):
         print("❌ Chargeback prediction error:", e)
 
 
-@router.post("/predict/subscription_revenue")
-def predict_subscription_revenue(req: TransactionRequest):
-    if not subscription_model or not subscription_scaler:
-        raise HTTPException(500, "Subscription model unavailable")
-    try:
-        X = subscription_scaler.transform([[req.amount, req.risk_score, req.hour]])
-        revenue = subscription_model.predict(X)[0]
-        return {
-            "expected_next_revenue": round(float(revenue), 2),
-            "customer_signal": {
-                "high_risk_score": req.risk_score > 60,
-                "transaction_hour": req.hour
-            },
-            "note": "Predicted using historical subscription patterns"
-        }
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
 @router.post("/predict/payment_gateway")
 def predict_payment_gateway(req: TransactionRequest):
     if not smart_routing_model:
@@ -597,6 +579,25 @@ def predict_payment_gateway(req: TransactionRequest):
         }
     except Exception as e:
         raise HTTPException(500, str(e))
+    
+@router.post("/predict/subscription_revenue")
+def predict_subscription_revenue(req: TransactionRequest):
+    if not subscription_model or not subscription_scaler:
+        raise HTTPException(500, "Subscription model unavailable")
+    try:
+        X = subscription_scaler.transform([[req.amount, req.risk_score, req.hour]])
+        revenue = subscription_model.predict(X)[0]
+        return {
+            "expected_next_revenue": round(float(revenue), 2),
+            "customer_signal": {
+                "high_risk_score": req.risk_score > 60,
+                "transaction_hour": req.hour
+            },
+            "note": "Predicted using historical subscription patterns"
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
     
     
 @app.get("/jobs/predict-chargebacks")
@@ -765,6 +766,34 @@ def predict_chargeback(req: TransactionRequest):
         print("❌ Chargeback prediction error:", e)
         raise HTTPException(status_code=500, detail=str(e))
     
+def predict_and_store_subscription_revenue(transaction):
+    try:
+        req = TransactionRequest(
+            amount=transaction["amount"],
+            card_country=transaction["card_country"],
+            billing_country=transaction["billing_address_country"],
+            email=transaction["email"],
+            risk_score=transaction["risk_score"],
+            ip_address=transaction["ip_address"],
+            fingerprint=transaction["fingerprint"],
+            hour=datetime.utcnow().hour
+        )
+
+        prediction = predict_subscription_revenue(req)
+        safe_prediction = {k: to_native(v) for k, v in prediction.items()}
+        safe_prediction["transaction_id"] = transaction["transaction_id"]
+        safe_prediction["email"] = transaction["email"]
+        safe_prediction["created_at"] = datetime.utcnow()
+
+        db["subscription_revenue_forecasts"].update_one(
+            {"transaction_id": transaction["transaction_id"]},
+            {"$set": safe_prediction},
+            upsert=True
+        )
+        print(f"📈 Subscription revenue forecast saved for {transaction['transaction_id']}")
+
+    except Exception as e:
+        print("❌ Revenue forecasting failed:", e)
     
     
 def update_transaction_with_chargeback(transaction_id, prediction_result, email):
