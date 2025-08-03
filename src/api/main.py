@@ -580,25 +580,112 @@ def predict_payment_gateway(req: TransactionRequest):
     except Exception as e:
         raise HTTPException(500, str(e))
     
-@router.post("/predict/subscription_revenue")
-def predict_subscription_revenue(req: TransactionRequest):
+@app.get("/jobs/subscription-forecast")
+def run_subscription_revenue_forecasting():
     if not subscription_model or not subscription_scaler:
-        raise HTTPException(500, "Subscription model unavailable")
-    try:
-        X = subscription_scaler.transform([[req.amount, req.risk_score, req.hour]])
-        revenue = subscription_model.predict(X)[0]
-        return {
-            "expected_next_revenue": round(float(revenue), 2),
-            "customer_signal": {
-                "high_risk_score": req.risk_score > 60,
-                "transaction_hour": req.hour
-            },
-            "note": "Predicted using historical subscription patterns"
-        }
-    except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail="Subscription model not available")
 
-    
+    try:
+        # Load encoders and metadata
+        enc_path = os.path.join(MODEL_PATH, "subscription_revenue_label_encoders.pkl")
+        metadata_path = [f for f in os.listdir(MODEL_PATH) if f.startswith("subscription_forecast_metadata")][-1]
+        with open(os.path.join(MODEL_PATH, metadata_path)) as f:
+            metadata = json.load(f)
+
+        final_features = metadata["features"]
+        label_encoders = joblib.load(enc_path)
+
+        cursor = db["subscriptions"].find({"forecasted": {"$exists": False}})
+        count = 0
+
+        for sub in cursor:
+            try:
+                # Feature extraction
+                created_at = pd.to_datetime(sub.get("created_at"))
+                current_period_start = pd.to_datetime(sub.get("current_period_start"))
+                current_period_end = pd.to_datetime(sub.get("current_period_end"))
+                billing_cycle_anchor = pd.to_datetime(sub.get("billing_cycle_anchor"))
+                ended_at = pd.to_datetime(sub.get("ended_at")) if sub.get("ended_at") else None
+                trial_start = pd.to_datetime(sub.get("trial_start")) if sub.get("trial_start") else None
+
+                account_age_days = (pd.Timestamp.now() - created_at).days
+                subscription_duration_days = (
+                    (current_period_end - current_period_start).days if current_period_end and current_period_start else 0
+                )
+                is_canceled = int(sub.get("cancel_at_period_end", False))
+                is_active = int(sub.get("status") == "active")
+                renewal_count = db["subscriptions"].count_documents({"email": sub["email"]})
+                average_subscription_value = list(db["subscriptions"].aggregate([
+                    {"$match": {"email": sub["email"]}},
+                    {"$group": {"_id": None, "avg": {"$avg": "$price_amount"}}}
+                ]))[0].get("avg", 0.0)
+
+                tenure_bucket = pd.cut(
+                    [account_age_days],
+                    bins=[0, 90, 180, 365, 730, np.inf],
+                    labels=["0-3m", "3-6m", "6-12m", "1-2y", "2y+"]
+                )[0]
+
+                # Categorical encoding
+                encoded = {}
+                for cat in ["collection_method", "currency", "interval", "gateway"]:
+                    val = str(sub.get(cat, "unknown"))
+                    encoded[cat] = label_encoders[cat].transform([val])[0] if val in label_encoders[cat].classes_ else 0
+                encoded["tenure_bucket"] = label_encoders["tenure_bucket"].transform([tenure_bucket])[0] if tenure_bucket in label_encoders["tenure_bucket"].classes_ else 0
+
+                # Feature vector
+                feature_row = {
+                    "account_age_days": account_age_days,
+                    "subscription_duration_days": subscription_duration_days,
+                    "is_canceled": is_canceled,
+                    "is_active": is_active,
+                    "total_subscription_periods": account_age_days // 30,
+                    "subscription_churned": int(ended_at is not None),
+                    "trial_used": int(trial_start is not None),
+                    "renewal_count": renewal_count,
+                    "multiple_subscriptions": int(renewal_count > 1),
+                    "average_subscription_value": average_subscription_value,
+                    "high_value_customer": int(average_subscription_value > 100),
+                    "payment_frequency": renewal_count,
+                    "long_term_discount": int(subscription_duration_days > 180),
+                    "days_since_last_renewal": (pd.Timestamp.now() - current_period_start).days if current_period_start else 0,
+                    "revenue_growth_rate": 0,
+                    "customer_lifetime_value": renewal_count * average_subscription_value,
+                    "subscription_start_month": current_period_start.month if current_period_start else 1,
+                    "start_dow": current_period_start.dayofweek if current_period_start else 0,
+                    **encoded
+                }
+
+                # Final feature input
+                X_input = pd.DataFrame([{k: float(v) for k, v in feature_row.items() if k in final_features}], columns=final_features)
+                X_scaled = subscription_scaler.transform(X_input)
+                forecast = float(subscription_model.predict(X_scaled)[0])
+
+                # Save forecast
+                db["subscription_forecasts"].update_one(
+                    {"subscription_id": sub["subscription_id"]},
+                    {
+                        "$set": {
+                            "forecasted": True,
+                            "predicted_revenue": round(forecast, 2),
+                            "forecasted_at": datetime.utcnow()
+                        }
+                    },
+                    upsert=True
+                )
+                print(f"✅ Forecast saved for {sub['subscription_id']}")
+                count += 1
+
+            except Exception as sub_e:
+                print(f"❌ Forecast error for subscription {sub.get('subscription_id')}: {sub_e}")
+
+        return {"message": f"✅ Forecast completed for {count} subscriptions."}
+
+    except Exception as e:
+        print(f"❌ Forecasting job failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
     
 @app.get("/jobs/predict-chargebacks")
 def run_chargeback_predictions_job():
