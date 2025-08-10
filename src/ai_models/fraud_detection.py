@@ -77,7 +77,10 @@ df['customer_last_transaction_diff'] = df.groupby('email')['amount'].diff().abs(
 df['customer_refund_ratio'] = df['email_refund_count'] / df['email_transaction_count']
 df['shared_card_email_count'] = df.groupby('fingerprint')['email'].transform('nunique')
 df['shared_ip_email_count'] = df.groupby('ip_address')['email'].transform('nunique')
-df['email_domain_risk'] = df['email'].apply(lambda x: 1 if x.split('@')[-1] in ['gmail.com', 'yahoo.com', 'hotmail.com'] else 0)
+valid_domains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'aol.com', 'protonmail.com', 'zoho.com', 'mail.com', 'gmx.com']
+df['email_domain_risk'] = df['email'].apply(
+    lambda x: 1 if x.split('@')[-1].lower() not in valid_domains else 0
+)
 df['previous_risk_scores_avg'] = df.groupby('email')['risk_score'].transform('mean')
 df['number_of_risky_transactions'] = df.groupby('email')['risk_score'].transform(lambda x: (x > 50).sum())
 

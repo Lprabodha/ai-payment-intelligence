@@ -42,7 +42,10 @@ df['average_transaction_amount'] = df.groupby('email')['amount'].transform('mean
 df['transaction_amount_diff'] = abs(df['amount'] - df['average_transaction_amount'])
 df['country_mismatch'] = (df['card_country'] != df['billing_address_country']).astype(int)
 df['ip_country_mismatch'] = (df['card_country'] != df['ip_address']).astype(int)
-df['email_domain_risk'] = df['email'].apply(lambda x: 1 if str(x).split('@')[-1] in ['gmail.com', 'yahoo.com', 'hotmail.com'] else 0)
+valid_domains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'aol.com', 'protonmail.com', 'zoho.com', 'mail.com', 'gmx.com']
+df['email_domain_risk'] = df['email'].apply(
+    lambda x: 1 if x.split('@')[-1].lower() not in valid_domains else 0
+)
 df['past_chargebacks'] = df.groupby('email')['disputed'].transform('sum')
 
 # Prepare features and target
