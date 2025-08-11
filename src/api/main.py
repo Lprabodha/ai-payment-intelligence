@@ -34,6 +34,12 @@ app = FastAPI(title="AI Payment Intelligence API")
 router = APIRouter()
 
 # ---------------------------
+# Stripe Radar overrides
+# ---------------------------
+RADAR_HIGH_OVERRIDE = 65   # >= 65 → force high-risk
+RADAR_MEDIUM_HINT   = 55   # >= 55 → bump confidence (optional)
+
+# ---------------------------
 # Utilities
 # ---------------------------
 def load_ai_model(name):
@@ -329,6 +335,7 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks, st
 
             background_tasks.add_task(process_fraud_workflow, transaction)
             background_tasks.add_task(predict_and_store_chargeback, transaction)
+            # Optionally: background_tasks.add_task(predict_and_store_subscription_revenue, transaction)
 
             return {"status": "queued", "invoice_id": invoice["id"]}
 
@@ -336,11 +343,6 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks, st
             print("❌ invoice.paid error:", e)
             raise HTTPException(status_code=500, detail=f"invoice.paid error: {str(e)}")
 
-        except Exception as e:
-            print("❌ invoice.paid error:", e)
-            return {"error": str(e)}
-        
-        
     elif event_type == "refund.created":
         try:
             charge_id = obj.get("charge")
@@ -381,7 +383,6 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks, st
 
         except Exception as e:
             print("❌ Refund handling failed:", str(e))
-            
             
     elif event_type == "charge.dispute.created":
         try:
@@ -424,7 +425,6 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks, st
 
         except Exception as e:
             print("❌ Dispute created handling failed:", str(e))
-            
             
     elif event_type == "charge.dispute.closed":
         try:
@@ -491,6 +491,7 @@ def process_fraud_workflow(transaction):
                 "risk_level": risk_level,
                 "reasons": prediction.get("reasons", []),
                 "thresholds": {"high_risk": 0.85, "medium_risk": 0.5},
+                "override_applied": bool(prediction.get("override_applied", False)),
             },
             "features_used": sanitize_for_mongo(prediction.get("features_used", {})),
             "model_info": {"name": "fraud_detection_model_final.pkl", "version": "v1.0", "run_time": datetime.utcnow().isoformat()},
@@ -501,12 +502,7 @@ def process_fraud_workflow(transaction):
             {"$set": result_doc},
             upsert=True
         )
-        rec = build_recommendations(transaction, prediction, None)
-        db["transactions"].update_one(
-            {"transaction_id": transaction.get("transaction_id")},
-            {"$set": {"recommendations": rec, "updated_at": datetime.utcnow()}},
-            upsert=True
-        )
+        recompute_recommendations_for_tx(transaction.get("transaction_id"))
         print("✅ Improved fraud result saved.")
     except Exception as e:
         print("❌ Fraud processing failed:", e)
@@ -525,11 +521,9 @@ def run_fraud_prediction(req: TransactionRequest):
     if fraud_pipeline is None and fraud_scaler is None:
         raise HTTPException(status_code=500, detail="Fraud scaler not loaded for legacy model")
 
-        raise HTTPException(status_code=500, detail="Fraud model or scaler not loaded")
-
     try:
         now = datetime.utcnow()
-        # Pull recent history (exclude current row; we will add current separately but compute features from history only)
+        # Pull recent history (exclude current row; we compute features from history only)
         recent_txn = db["transactions"].find({
             "email": req.email
         }).sort("created_at", -1).limit(200)
@@ -537,27 +531,14 @@ def run_fraud_prediction(req: TransactionRequest):
         for r in rows:
             r["created_at"] = r.get("created_at", now)
 
-        # Build history and current
+        # Build history frame
         history_df = pd.DataFrame(rows)
-        cur = {
-            "amount": req.amount,
-            "risk_score": req.risk_score,
-            "card_country": req.card_country,
-            "billing_address_country": req.billing_country,
-            "email": req.email,
-            "ip_address": req.ip_address,
-            "fingerprint": req.fingerprint,
-            "refunded": False,
-            "disputed": False,
-            "transaction_id": "latest_txn",
-            "created_at": now,
-        }
 
         # Compute features PAST-ONLY (from history_df)
         def safe_mean(s):
-            return float(s.mean()) if len(s) else 0.0
+            return float(pd.to_numeric(s, errors="coerce").mean()) if len(s) else 0.0
         def safe_sum(s):
-            return int(s.sum()) if len(s) else 0
+            return int(pd.to_numeric(s, errors="coerce").sum()) if len(s) else 0
         def safe_count(df):
             return int(len(df))
 
@@ -576,11 +557,10 @@ def run_fraud_prediction(req: TransactionRequest):
         else:
             q99 = float(pd.to_numeric(history_df.get("amount", pd.Series(dtype=float)), errors="coerce").quantile(0.99)) if not history_df.empty else 0.0
 
-        avg_amount_email = safe_mean(pd.to_numeric(h_email.get("amount", pd.Series(dtype=float)), errors="coerce"))
+        avg_amount_email = safe_mean(h_email.get("amount", pd.Series(dtype=float)))
         email_txn_count = safe_count(h_email)
-        email_dispute_count = safe_sum(pd.to_numeric(h_email.get("disputed", pd.Series(dtype=int)), errors="coerce"))
-        email_refund_count = safe_sum(pd.to_numeric(h_email.get("refunded", pd.Series(dtype=int)), errors="coerce"))
-        chargeback_rate = (email_dispute_count / email_txn_count) if email_txn_count else 0.0
+        email_dispute_count = safe_sum(h_email.get("disputed", pd.Series(dtype=int)))
+        email_refund_count = safe_sum(h_email.get("refunded", pd.Series(dtype=int)))
         refund_ratio = (email_refund_count / email_txn_count) if email_txn_count else 0.0
 
         features = {
@@ -603,7 +583,7 @@ def run_fraud_prediction(req: TransactionRequest):
             "unusual_amount_flag": int(req.amount > q99 if q99 > 0 else 0),
             "shared_card_email_count": int(h_fp["email"].nunique() if not h_fp.empty else 0),
             "shared_ip_email_count": int(h_ip["email"].nunique() if not h_ip.empty else 0),
-            "previous_risk_scores_avg": float(safe_mean(pd.to_numeric(h_email.get("risk_score", pd.Series(dtype=float)), errors="coerce"))),
+            "previous_risk_scores_avg": float(safe_mean(h_email.get("risk_score", pd.Series(dtype=float)))),
             "number_of_risky_transactions": int((pd.to_numeric(h_email.get("risk_score", pd.Series(dtype=float)), errors="coerce") > 70).sum()) if not h_email.empty else 0,
         }
 
@@ -641,10 +621,27 @@ def run_fraud_prediction(req: TransactionRequest):
             if cond:
                 reasons.append(msg)
 
+        # --- Stripe Radar hard overrides ------------------------------------
+        rs = float(features.get("risk_score", 0.0))
+        override_applied = False
+
+        # High override: force detection & boost confidence
+        if rs >= RADAR_HIGH_OVERRIDE:
+            pred = 1
+            proba = max(proba, 0.90)
+            reasons.append("Stripe risk score ≥ 65 (auto-flagged high risk)")
+            override_applied = True
+
+        # Optional hint tier: nudge confidence up
+        elif rs >= RADAR_MEDIUM_HINT:
+            proba = max(proba, 0.50)
+            reasons.append("Stripe risk score ≥ 55 (confidence boosted)")
+
         return {
             "fraud_detected": bool(pred),
             "confidence": round(proba, 4),
             "reasons": reasons,
+            "override_applied": override_applied,
             "features_used": {k: float(X.iloc[0][k]) for k in fraud_features},
         }
 
@@ -681,12 +678,8 @@ def predict_and_store_chargeback(transaction):
         safe_prediction["email"] = transaction.get("email")
         safe_prediction["created_at"] = datetime.utcnow()
         db["chargeback_predictions"].update_one({"transaction_id": transaction.get("transaction_id")}, {"$set": safe_prediction}, upsert=True)
-        rec = build_recommendations(transaction, None, prediction)
-        db["transactions"].update_one(
-            {"transaction_id": transaction.get("transaction_id")},
-            {"$set": {"recommendations": rec, "updated_at": datetime.utcnow()}},
-            upsert=True
-        )
+        recompute_recommendations_for_tx(transaction.get("transaction_id"))
+
         print("✅ Chargeback prediction saved.")
         update_transaction_with_chargeback(transaction.get("transaction_id"), prediction, transaction.get("email"))
         print(f"🔍 Chargeback prediction stored for {transaction.get('transaction_id')}")
@@ -836,11 +829,21 @@ def predict_and_store_subscription_revenue(transaction):
             fingerprint=transaction.get("fingerprint", "unknown"),
             hour=datetime.utcnow().hour,
         )
-            # Your predict_subscription_revenue(...) would go here
-        prediction = predict_subscription_revenue(req)
-        
-        # Persist as needed
-        pass
+        prediction = predict_subscription_revenue(req)  # {"predicted_subscription_revenue": ...}
+
+        doc = {
+            "transaction_id": transaction.get("transaction_id"),
+            "email": transaction.get("email"),
+            "predicted_revenue": to_native(prediction.get("predicted_subscription_revenue", 0.0)),
+            "created_at": datetime.utcnow()
+        }
+        db["subscription_revenue_forecasts"].update_one(
+            {"transaction_id": doc["transaction_id"]},
+            {"$set": doc},
+            upsert=True
+        )
+        print(f"📈 Subscription revenue forecast saved for {doc['transaction_id']}")
+
     except Exception as e:
         print("❌ Revenue forecasting failed:", e)
         
@@ -894,15 +897,15 @@ def predict_subscription_revenue(req: TransactionRequest):
 # ---------------------------
 # Recommendation engine
 # ---------------------------
-def _priority_from_risk(fraud_risk_level: str, cb_conf: float) -> str:
-    # map to a single priority flag
-    if fraud_risk_level == "high" or cb_conf >= 0.85:
+def _priority_from_risk(fraud_risk_level: str, cb_conf: float, override_applied: bool=False) -> str:
+    if override_applied or fraud_risk_level == "high" or cb_conf >= 0.85:
         return "critical"
     if fraud_risk_level == "medium" or cb_conf >= 0.5:
         return "high"
     if cb_conf >= 0.2:
         return "medium"
     return "low"
+
 
 def _uniq(seq):
     return list(dict.fromkeys([s for s in seq if s]))  # keep order, drop empties
@@ -929,6 +932,8 @@ def build_recommendations(transaction: dict,
     reasons = []
     if fraud_pred:
         reasons.extend(fraud_pred.get("reasons", []))
+        if fraud_pred.get("override_applied"):
+            reasons.append("Stripe Radar override applied")
     if chargeback_pred and chargeback_pred.get("chargeback_reason"):
         reasons.extend([s.strip() for s in chargeback_pred["chargeback_reason"].split(",")])
 
@@ -942,8 +947,7 @@ def build_recommendations(transaction: dict,
         actions.append("Delay fulfillment; require signature on delivery if physical goods")
         actions.append("Auto-cancel if additional KYC fails within 24h")
 
-    # 2) Routing suggestions (simple heuristics; you can replace with smart_routing_model if present)
-    # Examples: prefer gateway with stronger risk controls or lower dispute rate
+    # 2) Routing suggestions
     actions.append("Route future attempts for this email/device to a gateway with stronger risk controls")
     actions.append("Throttle repeat attempts (>3 in 10m) and add velocity checks")
 
@@ -986,6 +990,38 @@ def build_recommendations(transaction: dict,
         "recommended_actions": _uniq(actions)[:12], 
         "ttl_days": 30
     }
+    
+def recompute_recommendations_for_tx(txid: str):
+    tx = db["transactions"].find_one({"transaction_id": txid}) or {}
+    fraud_doc = db["fraud_results"].find_one({"transaction_id": txid}) or {}
+    cb_doc = db["chargeback_predictions"].find_one({"transaction_id": txid}) or {}
+
+    fraud_pred = None
+    if fraud_doc:
+        fp = fraud_doc.get("fraud_prediction", {})
+        fraud_pred = {
+            "fraud_detected": bool(fp.get("detected", False)),
+            "confidence": float(fp.get("confidence_score", 0.0)),
+            "reasons": fp.get("reasons", []),
+            "override_applied": bool(fp.get("override_applied", False)),
+        }
+
+    chargeback_pred = None
+    if cb_doc:
+        chargeback_pred = {
+            "chargeback_predicted": bool(cb_doc.get("chargeback_predicted", False)),
+            "confidence_score": float(cb_doc.get("confidence_score", 0.0)),
+            "chargeback_reason": cb_doc.get("chargeback_reason", ""),
+        }
+
+    rec = build_recommendations(tx or {}, fraud_pred, chargeback_pred)
+    db["transactions"].update_one(
+        {"transaction_id": txid},
+        {"$set": {"recommendations": sanitize_for_mongo(rec), "updated_at": datetime.utcnow()}},
+        upsert=True
+    )
+
+
 
 @app.get("/transactions/{txid}/recommendations")
 def get_recommendations(txid: str):
@@ -1003,7 +1039,16 @@ def update_transaction_with_chargeback(transaction_id, prediction_result, email)
     try:
         chargeback_predicted = to_native(prediction_result.get("chargeback_predicted", False))
         confidence_score = to_native(prediction_result.get("confidence_score", 0.0))
-        db["transactions"].update_one({"transaction_id": transaction_id}, {"$set": {"chargeback_predicted": chargeback_predicted, "chargeback_confidence": confidence_score, "email": email, "updated_at": datetime.utcnow()}}, upsert=True)
+        db["transactions"].update_one(
+            {"transaction_id": transaction_id},
+            {"$set": {
+                "chargeback_predicted": chargeback_predicted,
+                "chargeback_confidence": confidence_score,
+                "email": email,
+                "updated_at": datetime.utcnow()
+            }},
+            upsert=True
+        )
         print("✅ Chargeback prediction saved in `transactions`.")
     except Exception as e:
         print(f"❌ Failed to update `transactions`: {e}")
