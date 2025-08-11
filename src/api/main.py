@@ -123,8 +123,10 @@ subscription_pipeline = load_ai_model("subscription_revenue_pipeline.pkl")
 subscription_model = subscription_pipeline if subscription_pipeline is not None else load_ai_model("subscription_revenue_model.pkl")
 subscription_scaler = None if subscription_pipeline is not None else load_ai_model("subscription_revenue_scaler.pkl")
 
-smart_routing_model = load_model(os.path.join(MODEL_PATH, "smart_payment_routing_model.h5")) \
-    if os.path.exists(os.path.join(MODEL_PATH, "smart_payment_routing_model.h5")) else None
+smart_routing_model = load_model(
+    os.path.join(MODEL_PATH, "smart_payment_routing_model.h5"),
+    compile=False
+) if os.path.exists(os.path.join(MODEL_PATH, "smart_payment_routing_model.h5")) else None
 
 fraud_features_path = os.path.join(MODEL_PATH, "fraud_detection_metadata.json")
 if os.path.exists(fraud_features_path):
@@ -494,7 +496,17 @@ def process_fraud_workflow(transaction):
             "model_info": {"name": "fraud_detection_model_final.pkl", "version": "v1.0", "run_time": datetime.utcnow().isoformat()},
             "created_at": datetime.utcnow(),
         }
-        db["fraud_results"].insert_one(result_doc)
+        db["fraud_results"].update_one(
+            {"transaction_id": transaction.get("transaction_id")},
+            {"$set": result_doc},
+            upsert=True
+        )
+        rec = build_recommendations(transaction, prediction, None)
+        db["transactions"].update_one(
+            {"transaction_id": transaction.get("transaction_id")},
+            {"$set": {"recommendations": rec, "updated_at": datetime.utcnow()}},
+            upsert=True
+        )
         print("✅ Improved fraud result saved.")
     except Exception as e:
         print("❌ Fraud processing failed:", e)
@@ -576,7 +588,6 @@ def run_fraud_prediction(req: TransactionRequest):
             "amount_log": float(np.log1p(req.amount)),
             "hour": int(req.hour),
             "is_weekend": int(datetime.utcnow().weekday() >= 5),
-            # Reuse / counts based on history only
             "ip_address_reuse_count": safe_count(h_ip),
             "fingerprint_reuse_count": safe_count(h_fp),
             "device_ip_pair_reuse_count": safe_count(h_pair),
@@ -584,13 +595,11 @@ def run_fraud_prediction(req: TransactionRequest):
             "email_transaction_count": email_txn_count,
             "customer_refund_ratio": float(refund_ratio),
             "country_mismatch": int(req.card_country != req.billing_country),
-            # ip_country_mismatch only if you have ip_country in data
             "ip_country_mismatch": 0,
             "time_between_transactions": float(time_between),
             "email_domain_risk": int(_email_domain_risk(req.email)),
             "transaction_amount_diff": float(abs(req.amount - avg_amount_email)),
             "past_chargebacks": int(email_dispute_count),
-            # Auxiliary
             "unusual_amount_flag": int(req.amount > q99 if q99 > 0 else 0),
             "shared_card_email_count": int(h_fp["email"].nunique() if not h_fp.empty else 0),
             "shared_ip_email_count": int(h_ip["email"].nunique() if not h_ip.empty else 0),
@@ -612,18 +621,21 @@ def run_fraud_prediction(req: TransactionRequest):
         # Human-readable reasons (rule layer)
         reasons = []
         rule_checks = [
-            (features.get("unusual_amount_flag", 0) == 1, "Amount in top 1% of history"),
-            (features.get("country_mismatch", 0) == 1, "Card and billing country mismatch"),
-            (features.get("ip_country_mismatch", 0) == 1, "Card country and IP country mismatch"),
-            (features.get("ip_address_reuse_count", 0) > 5, "IP reused across many txns"),
-            (features.get("fingerprint_reuse_count", 0) > 3, "Device fingerprint reused"),
-            (features.get("device_ip_pair_reuse_count", 0) > 3, "Same device-IP pair repeated"),
-            (features.get("email_domain_risk", 0) == 1, "Non-common email domain"),
-            (features.get("customer_refund_ratio", 0.0) > 0.3, "High refund ratio historically"),
-            (features.get("past_chargebacks", 0) > 0, "Past chargebacks exist"),
-            (features.get("time_between_transactions", 999999.0) < 30, "Rapid repeat transaction (<30s)"),
-            (features.get("transaction_amount_diff", 0.0) > 100, "Amount far from customer's average"),
-            (features.get("previous_risk_scores_avg", 0.0) > 70, "Historically high Stripe risk"),
+            (features.get("unusual_amount_flag", 0) == 1, "Transaction amount is in the top 1% of customer's history"),
+            (features.get("country_mismatch", 0) == 1, "Card country and billing country do not match"),
+            (features.get("ip_country_mismatch", 0) == 1, "Card country and IP country do not match"),
+            (features.get("ip_address_reuse_count", 0) > 5, "IP address has been used in more than 5 previous transactions"),
+            (features.get("fingerprint_reuse_count", 0) > 3, "Device fingerprint has been reused in more than 3 transactions"),
+            (features.get("device_ip_pair_reuse_count", 0) > 3, "Same device and IP pair has been used in more than 3 transactions"),
+            (features.get("email_domain_risk", 0) == 1, "Email domain is uncommon or potentially risky"),
+            (features.get("customer_refund_ratio", 0.0) > 0.3, "Customer has a high historical refund ratio (>30%)"),
+            (features.get("past_chargebacks", 0) > 0, "Previous chargebacks found for this customer"),
+            (features.get("time_between_transactions", 999999.0) < 30, "Very short time between transactions (<30 seconds)"),
+            (features.get("transaction_amount_diff", 0.0) > 100, "Transaction amount deviates significantly from customer's average"),
+            (features.get("previous_risk_scores_avg", 0.0) > 70, "Customer has a high average Stripe risk score (>70)"),
+            (features.get("shared_card_email_count", 0) > 2, "Device fingerprint is associated with multiple emails"),
+            (features.get("shared_ip_email_count", 0) > 2, "IP address is associated with multiple emails"),
+            (features.get("number_of_risky_transactions", 0) > 2, "Customer has multiple previous high-risk transactions"),
         ]
         for cond, msg in rule_checks:
             if cond:
@@ -669,6 +681,12 @@ def predict_and_store_chargeback(transaction):
         safe_prediction["email"] = transaction.get("email")
         safe_prediction["created_at"] = datetime.utcnow()
         db["chargeback_predictions"].update_one({"transaction_id": transaction.get("transaction_id")}, {"$set": safe_prediction}, upsert=True)
+        rec = build_recommendations(transaction, None, prediction)
+        db["transactions"].update_one(
+            {"transaction_id": transaction.get("transaction_id")},
+            {"$set": {"recommendations": rec, "updated_at": datetime.utcnow()}},
+            upsert=True
+        )
         print("✅ Chargeback prediction saved.")
         update_transaction_with_chargeback(transaction.get("transaction_id"), prediction, transaction.get("email"))
         print(f"🔍 Chargeback prediction stored for {transaction.get('transaction_id')}")
@@ -773,32 +791,31 @@ def predict_chargeback(req: TransactionRequest):
             confidence = float(chargeback_model.predict_proba(X_scaled)[0][1])
             prediction = int(chargeback_model.predict(X_scaled)[0])
 
-        # Reasons (keep generic; model-agnostic)
         reasons = []
         if features['customer_refund_ratio_past'] > 0.5:
-            reasons.append("High refund ratio")
+            reasons.append("Customer has a high historical refund ratio (>50%)")
         if features['device_ip_pair_reuse_before'] > 3:
-            reasons.append("Device/IP reused")
+            reasons.append("Device/IP pair has been reused in multiple transactions")
         if features['country_mismatch'] == 1:
-            reasons.append("Card and billing country mismatch")
+            reasons.append("Card country and billing country do not match")
         if features['email_domain_risk'] == 1:
-            reasons.append("Non-common/free email domain")
-        if features['transaction_amount_diff'] > features['amount_log']:
-            reasons.append("Unusual transaction amount")
+            reasons.append("Email domain is uncommon or potentially risky")
+        if features['transaction_amount_diff'] > max(100, features['amount_log']):
+            reasons.append("Transaction amount is unusually different from customer's average")
         if features['email_transaction_count'] > 10:
-            reasons.append("Unusual number of transactions from email")
+            reasons.append("Email has an unusually high number of transactions")
         if features['fingerprint_reuse_before'] > 5:
-            reasons.append("Device fingerprint reused frequently")
+            reasons.append("Device fingerprint has been used for many transactions")
         if features['ip_address_reuse_before'] > 5:
-            reasons.append("IP address used for multiple transactions")
+            reasons.append("IP address has been used for many transactions")
         if features['risk_score'] > 70:
-            reasons.append("High fraud risk score")
+            reasons.append("Stripe risk score is high (>70)")
         if features['time_between_transactions'] < 60:
-            reasons.append("Rapid transaction frequency")
-        if features['past_chargebacks'] > 0:
-            reasons.append("Past chargebacks found for user")
+            reasons.append("Very short time between transactions (<60s)")
+        if features.get('past_chargebacks', features.get('past_chargeback', 0)) > 0:
+            reasons.append("Previous chargebacks found for this user")
         if features['amount_log'] > 8:
-            reasons.append("Very high transaction amount")
+            reasons.append("Transaction amount is extremely high")
 
         return {"chargeback_predicted": bool(prediction), "confidence_score": round(confidence, 4), "chargeback_reason": ", ".join(reasons) if reasons else "No strong indicators"}
 
@@ -841,7 +858,15 @@ def predict_subscription_revenue(req: TransactionRequest):
             'is_weekend': int(now.weekday() >= 5),
             'risk_score': float(req.risk_score),
             'email_domain_risk': int(_email_domain_risk(req.email)),
-            # Add other features used during training...
+            "customer_country_mismatch": int(req.card_country != req.billing_country),
+            "hour_of_day": int(now.hour),
+            "week_of_year": int(now.isocalendar()[1]),
+            "is_night": int(now.hour < 6 or now.hour > 22),
+            "email_length": int(len(req.email)),
+            "risk_score_squared": float(req.risk_score ** 2),
+            "email_at_gmail": int(req.email.lower().endswith("@gmail.com")),
+            "ip_address_length": int(len(req.ip_address)),
+            "fingerprint_length": int(len(req.fingerprint)),
         }
         subscription_meta_path = os.path.join(MODEL_PATH, "subscription_metadata.json")
         if os.path.exists(subscription_meta_path):
@@ -864,7 +889,110 @@ def predict_subscription_revenue(req: TransactionRequest):
     except Exception as e:
         print("❌ Subscription revenue prediction error:", e)
         raise HTTPException(status_code=500, detail=str(e))
+    
+    
+# ---------------------------
+# Recommendation engine
+# ---------------------------
+def _priority_from_risk(fraud_risk_level: str, cb_conf: float) -> str:
+    # map to a single priority flag
+    if fraud_risk_level == "high" or cb_conf >= 0.85:
+        return "critical"
+    if fraud_risk_level == "medium" or cb_conf >= 0.5:
+        return "high"
+    if cb_conf >= 0.2:
+        return "medium"
+    return "low"
 
+def _uniq(seq):
+    return list(dict.fromkeys([s for s in seq if s]))  # keep order, drop empties
+
+def build_recommendations(transaction: dict,
+                          fraud_pred: dict | None,
+                          chargeback_pred: dict | None) -> dict:
+    """
+    Returns a recommendation payload to store on the transaction.
+    """
+    txid = transaction.get("transaction_id")
+    amount = float(transaction.get("amount", 0.0))
+    currency = transaction.get("currency", "usd")
+
+    # Inputs
+    fraud_detected = bool(fraud_pred.get("fraud_detected", False)) if fraud_pred else False
+    fraud_conf = float(fraud_pred.get("confidence", 0.0)) if fraud_pred else 0.0
+    fraud_level = "high" if fraud_conf >= 0.85 else "medium" if fraud_conf >= 0.5 else "low"
+
+    cb_pred = bool(chargeback_pred.get("chargeback_predicted", False)) if chargeback_pred else False
+    cb_conf = float(chargeback_pred.get("confidence_score", 0.0)) if chargeback_pred else 0.0
+
+    # Human-facing reasons (merge & dedup)
+    reasons = []
+    if fraud_pred:
+        reasons.extend(fraud_pred.get("reasons", []))
+    if chargeback_pred and chargeback_pred.get("chargeback_reason"):
+        reasons.extend([s.strip() for s in chargeback_pred["chargeback_reason"].split(",")])
+
+    actions = []
+
+    # 1) Payment safety controls
+    if fraud_detected or fraud_level in ("medium", "high"):
+        actions.append("Require 3DS / step-up authentication")
+        actions.append("Hold for manual review before capture")
+        actions.append("Collect and verify billing address (AVS), postal code, and CVC")
+        actions.append("Delay fulfillment; require signature on delivery if physical goods")
+        actions.append("Auto-cancel if additional KYC fails within 24h")
+
+    # 2) Routing suggestions (simple heuristics; you can replace with smart_routing_model if present)
+    # Examples: prefer gateway with stronger risk controls or lower dispute rate
+    actions.append("Route future attempts for this email/device to a gateway with stronger risk controls")
+    actions.append("Throttle repeat attempts (>3 in 10m) and add velocity checks")
+
+    # 3) Reputation/velocity mitigations
+    if transaction.get("ip_address"):
+        actions.append("Temporarily block or rate-limit this IP if repeated high-risk attempts")
+    if transaction.get("fingerprint"):
+        actions.append("Flag device fingerprint for enhanced screening")
+    if transaction.get("email"):
+        actions.append("Place customer on watchlist; require verified email domain for higher amounts")
+
+    # 4) Chargeback-specific playbook
+    if cb_pred or cb_conf >= 0.5:
+        actions.append("Require proof-of-identity (photo ID) or SCA on next purchase")
+        actions.append("Use address + delivery confirmation evidence templates")
+        actions.append("Reduce high-value single-charge exposure (split payments or escrow)")
+
+    # 5) Tiering by amount
+    if amount >= 500:
+        actions.append("Enable step-up checks for amounts >= 500 " + currency.upper())
+    if amount >= 2000:
+        actions.append("Require manual review for amounts >= 2000 " + currency.upper())
+
+    priority = _priority_from_risk(fraud_level, cb_conf)
+
+    return {
+        "transaction_id": txid,
+        "created_at": datetime.utcnow(),
+        "priority": priority,
+        "summary": {
+            "fraud_detected": fraud_detected,
+            "fraud_confidence": round(fraud_conf, 4),
+            "fraud_level": fraud_level,
+            "chargeback_predicted": cb_pred,
+            "chargeback_confidence": round(cb_conf, 4),
+            "amount": amount,
+            "currency": currency,
+        },
+        "reasons": _uniq(reasons),
+        "recommended_actions": _uniq(actions)[:12], 
+        "ttl_days": 30
+    }
+
+@app.get("/transactions/{txid}/recommendations")
+def get_recommendations(txid: str):
+    doc = db["transactions"].find_one({"transaction_id": txid}, {"_id": 0, "recommendations": 1})
+    if not doc or "recommendations" not in doc:
+        raise HTTPException(404, "No recommendations for this transaction")
+    return doc["recommendations"]
 
 
 # ---------------------------

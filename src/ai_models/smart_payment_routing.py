@@ -96,7 +96,7 @@ def get_transaction_data(limit=3000):
         dataset.append((state, reward))
     return dataset
 
-def train_agent(episodes=200):
+def train_agent(episodes=20):
     state_size = 7  # Updated with new features
     action_size = 3  # Stripe, PayPal, Adyen
     agent = DQNAgent(state_size, action_size)

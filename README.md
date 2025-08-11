@@ -127,6 +127,11 @@ curl http://localhost:8000/revenue/forecast?customer_id=cus_xxx
 
 _For full API reference and interactive docs, see [`/docs`](./docs) or open Swagger UI at `/docs` when running the server._
 
+```bash
+stripe listen  --forward-to http://127.0.0.1:8010//webhook/stripe
+
+```
+
 ---
 
 ## 🤝 Contributing
