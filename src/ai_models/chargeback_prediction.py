@@ -3,6 +3,10 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from pymongo import MongoClient
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple, Optional
+import warnings
+warnings.filterwarnings('ignore')
 
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import (
@@ -11,78 +15,421 @@ from sklearn.metrics import (
     average_precision_score, precision_recall_curve
 )
 from sklearn.preprocessing import StandardScaler
-from imblearn.over_sampling import RandomOverSampler
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+from imblearn.over_sampling import SMOTE, RandomOverSampler
 from imblearn.pipeline import Pipeline as ImbPipeline
 from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
 import joblib
 import matplotlib.pyplot as plt
+import seaborn as sns
 
-# ---------------------------
-# Helpers (past-only, index-safe)
-# ---------------------------
-def ensure_cols(df: pd.DataFrame, cols, default=np.nan, astype=None):
-    for c in cols:
-        if c not in df.columns:
-            df[c] = default
-        if astype is not None:
-            df[c] = df[c].astype(astype)
-    return df
+# Try to import enhanced components (fallback if not available)
+try:
+    from advanced_features import AdvancedFeatureEngine
+    from ensemble_model import EnsembleModelManager, RulesEngine
+    ENHANCED_FEATURES_AVAILABLE = True
+except ImportError:
+    print("Enhanced features not available. Using basic implementation.")
+    ENHANCED_FEATURES_AVAILABLE = False
 
-def rolling_count_seconds(times: pd.Series, window_s: int) -> pd.Series:
-    """For a monotonically increasing datetime Series, return count of prior rows in sliding window."""
-    times = pd.to_datetime(times)
-    idx = times.index
-    out = np.zeros(len(times), dtype=np.int32)
-    j = 0
-    for i in range(len(times)):
-        t_hi = times.iloc[i]
-        t_lo = t_hi - pd.Timedelta(seconds=window_s)
-        while j < i and times.iloc[j] < t_lo:
-            j += 1
-        out[i] = i - j
-    return pd.Series(out, index=idx)
+class EnhancedChargebackPredictor:
+    """Enhanced Chargeback Prediction Model with Advanced Features and Ensemble Methods"""
+    
+    def __init__(self, config_path: str = None):
+        self.config_path = config_path or "src/data/models/"
+        self.models_dir = config_path or "src/data/models/"
+        self.scaler = StandardScaler()
+        self.base_models = {}
+        self.ensemble_model = None
+        self.feature_names = []
+        self.feature_importance = {}
+        self.model_metadata = {}
+        
+        # Initialize enhanced features if available
+        if ENHANCED_FEATURES_AVAILABLE:
+            self.feature_engine = AdvancedFeatureEngine()
+            self.ensemble_manager = EnsembleModelManager()
+            self.rules_engine = RulesEngine()
+        
+        # Setup directories
+        os.makedirs(self.models_dir, exist_ok=True)
+    
+    def train_model(self, df: pd.DataFrame, target_col: str = 'disputed') -> Dict:
+        """Train enhanced chargeback prediction model with ensemble methods"""
+        print("Starting enhanced chargeback model training...")
+        
+        # Create features
+        features_df = self.create_chargeback_features(df)
+        
+        # Prepare features and target
+        feature_columns = [col for col in features_df.columns 
+                          if col not in [target_col, 'transaction_id', 'created_at', 'customer_id', 'merchant_id']]
+        
+        X = features_df[feature_columns].select_dtypes(include=[np.number])
+        y = features_df[target_col]
+        
+        self.feature_names = X.columns.tolist()
+        print(f"Training with {len(self.feature_names)} features")
+        
+        # Handle class imbalance
+        print(f"Class distribution: {y.value_counts().to_dict()}")
+        
+        # Scale features
+        X_scaled = self.scaler.fit_transform(X)
+        X_scaled = pd.DataFrame(X_scaled, columns=self.feature_names)
+        
+        # Define base models
+        base_models_config = {
+            'xgboost': XGBClassifier(
+                n_estimators=200,
+                max_depth=6,
+                learning_rate=0.1,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                random_state=42,
+                eval_metric='logloss'
+            ),
+            'lightgbm': LGBMClassifier(
+                n_estimators=200,
+                max_depth=6,
+                learning_rate=0.1,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                random_state=42,
+                verbose=-1
+            ),
+            'random_forest': RandomForestClassifier(
+                n_estimators=100,
+                max_depth=10,
+                min_samples_split=5,
+                min_samples_leaf=2,
+                random_state=42
+            ),
+            'gradient_boosting': GradientBoostingClassifier(
+                n_estimators=100,
+                max_depth=6,
+                learning_rate=0.1,
+                random_state=42
+            ),
+            'logistic_regression': LogisticRegression(
+                random_state=42,
+                max_iter=1000,
+                class_weight='balanced'
+            )
+        }
+        
+        # Train base models with SMOTE
+        results = {}
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        
+        for model_name, model in base_models_config.items():
+            print(f"Training {model_name}...")
+            
+            # Create pipeline with SMOTE
+            pipeline = ImbPipeline([
+                ('smote', SMOTE(random_state=42)),
+                ('classifier', model)
+            ])
+            
+            # Cross-validation
+            cv_scores = cross_val_score(pipeline, X_scaled, y, cv=cv, scoring='roc_auc')
+            
+            # Fit final model
+            pipeline.fit(X_scaled, y)
+            self.base_models[model_name] = pipeline
+            
+            # Store results
+            results[model_name] = {
+                'cv_mean': cv_scores.mean(),
+                'cv_std': cv_scores.std(),
+                'cv_scores': cv_scores.tolist()
+            }
+            
+            print(f"{model_name} - CV AUC: {cv_scores.mean():.4f} (+/- {cv_scores.std()*2:.4f})")
+        
+        # Train ensemble model if enhanced features available
+        if ENHANCED_FEATURES_AVAILABLE:
+            try:
+                self.ensemble_model = self.ensemble_manager.create_ensemble(self.base_models, X_scaled, y)
+                ensemble_scores = cross_val_score(self.ensemble_model, X_scaled, y, cv=cv, scoring='roc_auc')
+                results['ensemble'] = {
+                    'cv_mean': ensemble_scores.mean(),
+                    'cv_std': ensemble_scores.std(),
+                    'cv_scores': ensemble_scores.tolist()
+                }
+                print(f"Ensemble - CV AUC: {ensemble_scores.mean():.4f} (+/- {ensemble_scores.std()*2:.4f})")
+            except Exception as e:
+                print(f"Warning: Could not train ensemble model: {e}")
+        
+        # Calculate feature importance (using best model)
+        best_model_name = max(results.keys(), key=lambda k: results[k]['cv_mean'])
+        best_model = self.base_models[best_model_name]
+        
+        if hasattr(best_model.named_steps['classifier'], 'feature_importances_'):
+            self.feature_importance = dict(zip(self.feature_names, 
+                                             best_model.named_steps['classifier'].feature_importances_))
+        
+        # Store metadata
+        self.model_metadata = {
+            'training_date': datetime.now().isoformat(),
+            'feature_count': len(self.feature_names),
+            'training_samples': len(X),
+            'class_distribution': y.value_counts().to_dict(),
+            'model_performance': results,
+            'best_model': best_model_name,
+            'feature_names': self.feature_names
+        }
+        
+        # Save models
+        self._save_models()
+        self._save_metadata()
+        self._generate_model_report(X_scaled, y)
+        
+        print(f"Model training completed. Best model: {best_model_name}")
+        return results
+    
+    def predict_chargeback_risk(self, transaction_data: Dict) -> Dict:
+        """Predict chargeback risk for a single transaction"""
+        try:
+            # Convert to DataFrame
+            df = pd.DataFrame([transaction_data])
+            
+            # Create features
+            features_df = self.create_chargeback_features(df)
+            feature_columns = [col for col in features_df.columns 
+                              if col in self.feature_names]
+            
+            X = features_df[feature_columns].select_dtypes(include=[np.number])
+            
+            # Ensure all required features are present
+            for feature in self.feature_names:
+                if feature not in X.columns:
+                    X[feature] = 0
+            
+            X = X[self.feature_names]  # Reorder columns
+            X_scaled = self.scaler.transform(X)
+            
+            # Get predictions from all models
+            predictions = {}
+            probabilities = {}
+            
+            for model_name, model in self.base_models.items():
+                prob = model.predict_proba(X_scaled)[0]
+                pred = model.predict(X_scaled)[0]
+                predictions[model_name] = int(pred)
+                probabilities[model_name] = {
+                    'no_chargeback': float(prob[0]),
+                    'chargeback': float(prob[1])
+                }
+            
+            # Ensemble prediction if available
+            if self.ensemble_model:
+                ensemble_prob = self.ensemble_model.predict_proba(X_scaled)[0]
+                ensemble_pred = self.ensemble_model.predict(X_scaled)[0]
+                predictions['ensemble'] = int(ensemble_pred)
+                probabilities['ensemble'] = {
+                    'no_chargeback': float(ensemble_prob[0]),
+                    'chargeback': float(ensemble_prob[1])
+                }
+            
+            # Rule-based adjustment if available
+            rule_score = 0
+            rule_factors = []
+            if ENHANCED_FEATURES_AVAILABLE and self.rules_engine:
+                try:
+                    rule_result = self.rules_engine.apply_chargeback_rules(transaction_data)
+                    rule_score = rule_result.get('risk_score', 0)
+                    rule_factors = rule_result.get('triggered_rules', [])
+                except Exception as e:
+                    print(f"Warning: Rule engine failed: {e}")
+            
+            # Calculate final risk score (ensemble if available, otherwise best model)
+            if 'ensemble' in probabilities:
+                base_risk = probabilities['ensemble']['chargeback']
+            else:
+                best_model = max(probabilities.keys(), 
+                               key=lambda k: probabilities[k]['chargeback'])
+                base_risk = probabilities[best_model]['chargeback']
+            
+            # Combine ML prediction with rule-based score
+            final_risk_score = min(0.95, base_risk + (rule_score * 0.1))
+            
+            # Determine risk level
+            if final_risk_score >= 0.7:
+                risk_level = "HIGH"
+            elif final_risk_score >= 0.4:
+                risk_level = "MEDIUM"
+            else:
+                risk_level = "LOW"
+            
+            return {
+                'chargeback_risk_score': final_risk_score,
+                'risk_level': risk_level,
+                'model_predictions': predictions,
+                'model_probabilities': probabilities,
+                'rule_based_score': rule_score,
+                'triggered_rules': rule_factors,
+                'feature_importance': dict(sorted(self.feature_importance.items(), 
+                                                key=lambda x: x[1], reverse=True)[:10]) if self.feature_importance else {},
+                'model_version': self.model_metadata.get('training_date', 'unknown'),
+                'prediction_timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            print(f"Error predicting chargeback risk: {e}")
+            return {
+                'chargeback_risk_score': 0.5,
+                'risk_level': "UNKNOWN",
+                'error': str(e),
+                'prediction_timestamp': datetime.now().isoformat()
+            }
+    
+    def _save_models(self):
+        """Save trained models to disk"""
+        # Save scaler
+        joblib.dump(self.scaler, os.path.join(self.models_dir, 'chargeback_scaler.pkl'))
+        
+        # Save base models
+        for model_name, model in self.base_models.items():
+            joblib.dump(model, os.path.join(self.models_dir, f'chargeback_{model_name}.pkl'))
+        
+        # Save ensemble model if available
+        if self.ensemble_model:
+            joblib.dump(self.ensemble_model, os.path.join(self.models_dir, 'chargeback_ensemble.pkl'))
+        
+        # Save feature names and importance
+        joblib.dump(self.feature_names, os.path.join(self.models_dir, 'chargeback_features.pkl'))
+        joblib.dump(self.feature_importance, os.path.join(self.models_dir, 'chargeback_feature_importance.pkl'))
+    
+    def _save_metadata(self):
+        """Save model metadata"""
+        with open(os.path.join(self.models_dir, 'chargeback_metadata.json'), 'w') as f:
+            json.dump(self.model_metadata, f, indent=2)
+    
+    def _generate_model_report(self, X: pd.DataFrame, y: pd.Series):
+        """Generate comprehensive model report with visualizations"""
+        try:
+            # Feature importance plot
+            if self.feature_importance:
+                top_features = dict(sorted(self.feature_importance.items(), 
+                                         key=lambda x: x[1], reverse=True)[:15])
+                
+                plt.figure(figsize=(12, 8))
+                features = list(top_features.keys())
+                importances = list(top_features.values())
+                
+                plt.barh(features, importances)
+                plt.title('Top 15 Feature Importances - Chargeback Prediction')
+                plt.xlabel('Importance Score')
+                plt.tight_layout()
+                plt.savefig(os.path.join(self.models_dir, 'chargeback_feature_importance.png'), 
+                           dpi=300, bbox_inches='tight')
+                plt.close()
+            
+            # Model performance comparison
+            if len(self.base_models) > 1:
+                model_scores = {}
+                for name, model in self.base_models.items():
+                    try:
+                        y_pred_proba = model.predict_proba(X)[:, 1]
+                        auc_score = roc_auc_score(y, y_pred_proba)
+                        model_scores[name] = auc_score
+                    except:
+                        continue
+                
+                if model_scores:
+                    plt.figure(figsize=(10, 6))
+                    models = list(model_scores.keys())
+                    scores = list(model_scores.values())
+                    
+                    plt.bar(models, scores)
+                    plt.title('Model Performance Comparison (ROC-AUC)')
+                    plt.ylabel('ROC-AUC Score')
+                    plt.xticks(rotation=45)
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(self.models_dir, 'chargeback_model_comparison.png'),
+                               dpi=300, bbox_inches='tight')
+                    plt.close()
+            
+        except Exception as e:
+            print(f"Warning: Could not generate model report: {e}")
+    
+    def load_models(self):
+        """Load trained models from disk"""
+        try:
+            # Load scaler
+            self.scaler = joblib.load(os.path.join(self.models_dir, 'chargeback_scaler.pkl'))
+            
+            # Load feature names and importance
+            self.feature_names = joblib.load(os.path.join(self.models_dir, 'chargeback_features.pkl'))
+            self.feature_importance = joblib.load(os.path.join(self.models_dir, 'chargeback_feature_importance.pkl'))
+            
+            # Load base models
+            model_files = {
+                'xgboost': 'chargeback_xgboost.pkl',
+                'lightgbm': 'chargeback_lightgbm.pkl', 
+                'random_forest': 'chargeback_random_forest.pkl',
+                'gradient_boosting': 'chargeback_gradient_boosting.pkl',
+                'logistic_regression': 'chargeback_logistic_regression.pkl'
+            }
+            
+            for model_name, filename in model_files.items():
+                model_path = os.path.join(self.models_dir, filename)
+                if os.path.exists(model_path):
+                    self.base_models[model_name] = joblib.load(model_path)
+            
+            # Load ensemble model if available
+            ensemble_path = os.path.join(self.models_dir, 'chargeback_ensemble.pkl')
+            if os.path.exists(ensemble_path):
+                self.ensemble_model = joblib.load(ensemble_path)
+            
+            # Load metadata
+            metadata_path = os.path.join(self.models_dir, 'chargeback_metadata.json')
+            if os.path.exists(metadata_path):
+                with open(metadata_path, 'r') as f:
+                    self.model_metadata = json.load(f)
+            
+            print(f"Loaded chargeback models: {list(self.base_models.keys())}")
+            return True
+            
+        except Exception as e:
+            print(f"Error loading models: {e}")
+            return False
 
-def domain_risk(email: str, common_domains: set) -> int:
-    dom = str(email).split("@")[-1].lower() if "@" in str(email) else "unknown"
-    return 0 if dom in common_domains else 1
+# Legacy function to maintain compatibility
+def train_chargeback_model():
+    """Legacy function for backward compatibility"""
+    try:
+        load_dotenv()
+        mongo_uri = os.getenv("MONGO_URI")
+        if not mongo_uri:
+            raise ValueError("Missing MONGO_URI in environment")
+        
+        client = MongoClient(mongo_uri)
+        db = client["payment_intelligence"]
+        
+        # Load transaction data
+        transactions = list(db["transactions"].find())
+        if not transactions:
+            raise ValueError("No transactions found in database")
+        
+        df = pd.DataFrame(transactions)
+        
+        # Initialize and train model
+        predictor = EnhancedChargebackPredictor()
+        results = predictor.train_model(df)
+        
+        print("Chargeback model training completed successfully!")
+        return results
+        
+    except Exception as e:
+        print(f"Error training chargeback model: {e}")
+        return None
 
-# ---------------------------
-# 0) Load data
-# ---------------------------
-load_dotenv()
-MONGO_URI = os.getenv("MONGO_URI")
-if not MONGO_URI:
-    raise ValueError("Missing MONGO_URI in environment.")
-
-client = MongoClient(MONGO_URI)
-db = client["payment_intelligence"]
-tx = pd.DataFrame(db["transactions"].find())
-if tx.empty:
-    raise ValueError("No transactions found.")
-if "created_at" not in tx.columns:
-    raise ValueError("transactions.created_at is required.")
-
-# ---------------------------
-# 1) Basic cleaning
-# ---------------------------
-tx["created_at"] = pd.to_datetime(tx["created_at"], errors="coerce")
-tx = tx.dropna(subset=["created_at"]).sort_values("created_at").reset_index(drop=True)
-
-needed = [
-    "transaction_id","email","amount","card_country","billing_address_country",
-    "risk_score","disputed","refunded","ip_address","fingerprint","gateway"
-]
-tx = ensure_cols(tx, needed)
-tx["email"] = tx["email"].astype(str).fillna("unknown@example.com")
-tx["amount"] = pd.to_numeric(tx["amount"], errors="coerce").fillna(0.0)
-tx["risk_score"] = pd.to_numeric(tx["risk_score"], errors="coerce").fillna(0.0)
-tx["disputed"] = pd.to_numeric(tx["disputed"], errors="coerce").fillna(0).astype(int)
-tx["refunded"] = pd.to_numeric(tx["refunded"], errors="coerce").fillna(0).astype(int)
-tx["card_country"] = tx["card_country"].astype(str).fillna("UNK")
-tx["billing_address_country"] = tx["billing_address_country"].astype(str).fillna("UNK")
-tx["ip_address"] = tx["ip_address"].astype(str).fillna("0.0.0.0")
-tx["fingerprint"] = tx["fingerprint"].astype(str).fillna("unknown")
-tx["gateway"] = tx["gateway"].astype(str).fillna("unknown")
+if __name__ == "__main__":
+    train_chargeback_model()
 
 # ---------------------------
 # 2) Leakage-safe feature engineering (PAST ONLY)
