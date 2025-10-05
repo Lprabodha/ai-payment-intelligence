@@ -14,6 +14,7 @@ from database.indexes import ensure_database_indexes
 from routes.health import router as health_router
 from routes.predictions import router as predictions_router
 from routes.webhooks import router as webhooks_router
+from routes.risk import router as risk_router
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application"""
@@ -46,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(predictions_router)
     app.include_router(webhooks_router)
+    app.include_router(risk_router)
     
     return app
 
@@ -56,18 +58,18 @@ app = create_app()
 @app.on_event("startup")
 async def startup_event():
     """Application startup event"""
-    print(f"🚀 {settings.API_TITLE} v{settings.API_VERSION} starting up...")
-    print(f"📊 Database: {settings.DATABASE_NAME}")
-    print(f"🤖 Model path: {settings.MODEL_PATH}")
-    print("✅ Application startup completed")
+    print(f"{settings.API_TITLE} v{settings.API_VERSION} starting up...")
+    print(f"Database: {settings.DATABASE_NAME}")
+    print(f"Model path: {settings.MODEL_PATH}")
+    print("Application startup completed")
 
 # Shutdown event
 @app.on_event("shutdown")
 async def shutdown_event():
     """Application shutdown event"""
-    print("🛑 Application shutting down...")
+    print("Application shutting down...")
     db_manager.close()
-    print("✅ Application shutdown completed")
+    print("Application shutdown completed")
 
 if __name__ == "__main__":
     import uvicorn

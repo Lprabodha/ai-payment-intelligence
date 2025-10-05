@@ -25,7 +25,7 @@ class DatabaseManager:
             
             # Test connection
             self.client.admin.command('ping')
-            print("Successfully connected to MongoDB")
+            print("Connected to MongoDB")
             
         except Exception as e:
             print(f"Failed to connect to MongoDB: {e}")

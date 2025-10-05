@@ -62,8 +62,10 @@ async def solidgate_webhook(request: Request, background_tasks: BackgroundTasks)
         # Parse webhook data
         webhook_data = json.loads(payload_str)
         
-        # Get event type from the webhook data structure
-        event_type = webhook_data.get('event_type') or webhook_data.get('callback_type')
+        # Get event type from headers first, then from payload
+        event_type = request.headers.get('solidgate-event-type')
+        if not event_type:
+            event_type = webhook_data.get('event_type') or webhook_data.get('callback_type')
         
         # Get event ID and timestamp for idempotency
         event_id = request.headers.get('solidgate-event-id')

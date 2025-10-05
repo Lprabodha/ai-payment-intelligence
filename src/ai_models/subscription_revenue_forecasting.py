@@ -37,7 +37,7 @@ class EnhancedSubscriptionForecaster:
         """Load and preprocess subscription data"""
         try:
             # Create synthetic data for training (since we don't have real subscription data)
-            print("🔄 Creating synthetic subscription data for training...")
+            print("Creating synthetic subscription data for training...")
             
             np.random.seed(42)
             n_samples = 2000
@@ -76,7 +76,7 @@ class EnhancedSubscriptionForecaster:
             data['revenue'] = np.maximum(revenue, 5)  # Ensure positive revenue
             
             df = pd.DataFrame(data)
-            print(f"📊 Generated {len(df)} synthetic subscription records")
+            print(f"Generated {len(df)} synthetic subscription records")
             
             return df
             
@@ -121,7 +121,7 @@ class EnhancedSubscriptionForecaster:
             upper_bound = Q3 + 1.5 * IQR
             df = df[(df['revenue'] >= lower_bound) & (df['revenue'] <= upper_bound)]
             
-            print(f"📊 Feature engineering completed. Dataset shape: {df.shape}")
+            print(f"Feature engineering completed. Dataset shape: {df.shape}")
             return df
             
         except Exception as e:
@@ -151,7 +151,7 @@ class EnhancedSubscriptionForecaster:
             X = X.fillna(X.mean())
             y = y.fillna(y.mean())
             
-            print(f"📊 Prepared features: {X.shape[1]} features, {X.shape[0]} samples")
+            print(f"Prepared features: {X.shape[1]} features, {X.shape[0]} samples")
             return X, y
             
         except Exception as e:
@@ -203,19 +203,19 @@ class EnhancedSubscriptionForecaster:
                 ),
                 'ridge': Ridge(
                     alpha=1.0,
-                    random_state=42
-                )
+    random_state=42
+)
             }
             
             # Train models
             model_scores = {}
             for name, model in self.models.items():
-                print(f"🔄 Training {name}...")
+                print(f"Training {name}...")
                 
-                model.fit(X_train_scaled, y_train)
-                
+model.fit(X_train_scaled, y_train)
+
                 # Evaluate
-                y_pred = model.predict(X_test_scaled)
+y_pred = model.predict(X_test_scaled)
                 mae = mean_absolute_error(y_test, y_pred)
                 model_scores[name] = mae
                 print(f"   {name} MAE: {mae:.2f}")
@@ -236,7 +236,7 @@ class EnhancedSubscriptionForecaster:
             ensemble_mae = mean_absolute_error(y_test, y_pred_ensemble)
             ensemble_r2 = r2_score(y_test, y_pred_ensemble)
             
-            print(f"🎯 Ensemble MAE: {ensemble_mae:.2f}, R²: {ensemble_r2:.3f}")
+            print(f"Ensemble MAE: {ensemble_mae:.2f}, R²: {ensemble_r2:.3f}")
             
             self.results = {
                 'model_scores': model_scores,
@@ -301,22 +301,22 @@ class EnhancedSubscriptionForecaster:
             # Save ensemble model
             ensemble_path = os.path.join(model_path, "subscription_ensemble_model.pkl")
             joblib.dump(self.models['ensemble'], ensemble_path)
-            print(f"✅ Saved ensemble model: {ensemble_path}")
+            print(f"Saved ensemble model: {ensemble_path}")
             
             # Save scaler
             scaler_path = os.path.join(model_path, "subscription_revenue_scaler.pkl")
             joblib.dump(self.scaler, scaler_path)
-            print(f"✅ Saved scaler: {scaler_path}")
+            print(f"Saved scaler: {scaler_path}")
             
             # Save feature importance
             feature_importance = self._calculate_feature_importance()
             importance_path = os.path.join(model_path, "subscription_feature_importance.json")
             with open(importance_path, 'w') as f:
                 json.dump(dict(feature_importance[:10]), f, indent=2)
-            print(f"✅ Saved feature importance: {importance_path}")
+            print(f"Saved feature importance: {importance_path}")
             
             # Save metadata
-            metadata = {
+metadata = {
                 'feature_columns': self.feature_columns,
                 'model_scores': results['model_scores'],
                 'ensemble_mae': results['ensemble_mae'],
@@ -329,7 +329,7 @@ class EnhancedSubscriptionForecaster:
             metadata_path = os.path.join(model_path, "subscription_revenue_metadata.json")
             with open(metadata_path, 'w') as f:
                 json.dump(metadata, f, indent=2)
-            print(f"✅ Saved metadata: {metadata_path}")
+            print(f"Saved metadata: {metadata_path}")
             
         except Exception as e:
             print(f"Error saving models: {e}")
@@ -381,7 +381,7 @@ class EnhancedSubscriptionForecaster:
             # Save plot
             plot_path = "/src/data/models/subscription_forecast_plots.png"
             plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            print(f"✅ Saved visualization: {plot_path}")
+            print(f"Saved visualization: {plot_path}")
             
             plt.close()
             
@@ -390,7 +390,7 @@ class EnhancedSubscriptionForecaster:
 
 def train_enhanced_subscription_forecaster():
     """Train enhanced subscription revenue forecaster"""
-    print("🚀 Starting Enhanced Subscription Revenue Forecasting Training...")
+    print("Starting Enhanced Subscription Revenue Forecasting Training...")
     
     try:
         # Initialize forecaster

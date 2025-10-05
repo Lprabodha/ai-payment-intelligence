@@ -22,7 +22,7 @@ async def handle_solidgate_webhook(event_type: str, webhook_data: dict, event_id
         # Route to appropriate handler
         if event_type == "card_gate.order.updated":
             await _handle_solidgate_order_updated(webhook_data, event_id)
-        elif event_type == "subscription.updated":
+        elif event_type in ["subscription.updated", "subscription.updated.v2"]:
             await _handle_solidgate_subscription_updated(webhook_data, event_id)
         elif event_type == "create":  # New subscription created
             await _handle_solidgate_subscription_created(webhook_data, event_id)
@@ -30,6 +30,8 @@ async def handle_solidgate_webhook(event_type: str, webhook_data: dict, event_id
             await _handle_solidgate_subscription_activated(webhook_data, event_id)
         elif event_type == "renew":  # Subscription renewed
             await _handle_solidgate_subscription_renewed(webhook_data, event_id)
+        elif event_type == "init":  # Subscription initialization
+            await _handle_solidgate_subscription_created(webhook_data, event_id)
         else:
             print(f"Unhandled Solidgate event type: {event_type}")
             
@@ -122,33 +124,60 @@ async def _handle_solidgate_order_updated(webhook_data: dict, event_id: str = No
             db["transactions"].insert_one(sanitize_for_mongo(transaction))
             print(f"New Solidgate transaction saved: {transaction_id}")
         
-        # Get smart routing prediction for successful payments
-        if txn_status == "succeeded":
-            routing_prediction = _get_smart_routing_prediction({
-                'amount': float(order_data.get('amount', 0)) / 100,
-                'card_country': card_data.get('country', 'US'),
-                'card_brand': card_data.get('brand', 'VISA'),
-                'risk_score': order_data.get('risk_score', 0)
-            })
-            
-            # Store routing prediction
-            routing_result = {
+        # Run fraud detection and chargeback prediction for all transactions
+        if transaction_id:
+            # Prepare transaction data for predictions
+            transaction_data = {
                 "transaction_id": transaction_id,
-                "recommended_gateway": routing_prediction.get('recommended_gateway'),
-                "confidence": routing_prediction.get('confidence'),
-                "all_scores": routing_prediction.get('all_scores', {}),
-                "current_gateway": "Solidgate",
-                "prediction_time": datetime.utcnow(),
-                "error": routing_prediction.get('error')
+                "email": order_data.get('customer_email', 'unknown@example.com'),
+                "amount": float(order_data.get('amount', 0)) / 100,
+                "currency": order_data.get('currency', 'usd').lower(),
+                "card_brand": card_data.get('brand', 'VISA'),
+                "card_country": card_data.get('country', 'US'),
+                "ip_address": order_data.get('ip_address', 'unknown'),
+                "fingerprint": card_data.get('card_id'),
+                "risk_score": order_data.get('risk_score', 0),
+                "status": txn_status,
+                "gateway": "Solidgate"
             }
             
-            db["routing_predictions"].update_one(
-                {"transaction_id": transaction_id},
-                {"$set": routing_result},
-                upsert=True
-            )
+            # Run fraud detection
+            fraud_result = _run_fraud_detection(transaction_data)
+            if fraud_result:
+                print(f"Fraud detection for {transaction_id}: {fraud_result.get('is_fraud', False)} (confidence: {fraud_result.get('confidence_score', 0):.3f})")
             
-            print(f"Routing prediction for {transaction_id}: {routing_prediction.get('recommended_gateway')} (confidence: {routing_prediction.get('confidence'):.3f})")
+            # Run chargeback prediction
+            chargeback_result = _run_chargeback_prediction(transaction_data)
+            if chargeback_result:
+                print(f"Chargeback prediction for {transaction_id}: {chargeback_result.get('chargeback_predicted', False)} (confidence: {chargeback_result.get('confidence_score', 0):.3f})")
+            
+            # Get smart routing prediction for successful payments
+            if txn_status == "succeeded":
+                routing_prediction = _get_smart_routing_prediction({
+                    'amount': float(order_data.get('amount', 0)) / 100,
+                    'card_country': card_data.get('country', 'US'),
+                    'card_brand': card_data.get('brand', 'VISA'),
+                    'risk_score': order_data.get('risk_score', 0)
+                })
+                
+                # Store routing prediction
+                routing_result = {
+                    "transaction_id": transaction_id,
+                    "recommended_gateway": routing_prediction.get('recommended_gateway'),
+                    "confidence": routing_prediction.get('confidence'),
+                    "all_scores": routing_prediction.get('all_scores', {}),
+                    "current_gateway": "Solidgate",
+                    "prediction_time": datetime.utcnow(),
+                    "error": routing_prediction.get('error')
+                }
+                
+                db["routing_predictions"].update_one(
+                    {"transaction_id": transaction_id},
+                    {"$set": routing_result},
+                    upsert=True
+                )
+                
+                print(f"Routing prediction for {transaction_id}: {routing_prediction.get('recommended_gateway')} (confidence: {routing_prediction.get('confidence'):.3f})")
         
         # Mark event as processed
         if event_id:
@@ -166,7 +195,7 @@ async def _handle_solidgate_subscription_updated(webhook_data: dict, event_id: s
     """Handle subscription.updated event from Solidgate"""
     try:
         subscription_data = webhook_data.get('subscription', {})
-        subscription_id = subscription_data.get('subscription_id') or subscription_data.get('id')
+        subscription_id = subscription_data.get('id') or subscription_data.get('subscription_id')
         
         if not subscription_id:
             print("No subscription ID found in Solidgate subscription.updated webhook")
@@ -174,8 +203,8 @@ async def _handle_solidgate_subscription_updated(webhook_data: dict, event_id: s
         
         # Extract subscription details
         status = subscription_data.get('status', 'active')
-        product_data = subscription_data.get('product', {})
-        customer_data = subscription_data.get('customer', {})
+        product_data = webhook_data.get('product', {})
+        customer_data = webhook_data.get('customer', {})
         
         # Update subscription record
         subscription_update = {
@@ -252,30 +281,34 @@ async def _handle_solidgate_subscription_updated(webhook_data: dict, event_id: s
         print(f"Error handling Solidgate subscription.updated: {e}")
 
 async def _handle_solidgate_subscription_created(webhook_data: dict, event_id: str = None):
-    """Handle subscription creation (callback_type: create) from Solidgate"""
+    """Handle subscription creation (callback_type: create or init) from Solidgate"""
     try:
         subscription_data = webhook_data.get('subscription', {})
-        subscription_id = subscription_data.get('subscription_id') or subscription_data.get('id')
+        subscription_id = subscription_data.get('id') or subscription_data.get('subscription_id')
         
         if not subscription_id:
             print("No subscription ID found in Solidgate subscription created webhook")
             return
         
+        # Get customer and product data from webhook
+        customer_data = webhook_data.get('customer', {})
+        product_data = webhook_data.get('product', {})
+        
         # Create subscription record for new subscription
         subscription = {
             "subscription_id": subscription_id,
-            "email": subscription_data.get('customer_email', 'unknown@example.com'),
+            "email": customer_data.get('customer_email', 'unknown@example.com'),
             "gateway": "Solidgate",
             "status": "pending",  # New subscriptions start as pending
-            "current_period_start": datetime.fromisoformat(subscription_data.get('created_at').replace('Z', '+00:00')) if subscription_data.get('created_at') else datetime.utcnow(),
-            "current_period_end": None,  # Will be set when activated
-            "plan_id": subscription_data.get('product_id'),
-            "plan_name": subscription_data.get('product'),
-            "product_id": subscription_data.get('product_id'),
-            "price_amount": float(subscription_data.get('amount', 0)) / 100,
-            "currency": subscription_data.get('currency', 'usd').lower(),
+            "current_period_start": datetime.fromisoformat(subscription_data.get('started_at').replace('Z', '+00:00')) if subscription_data.get('started_at') else datetime.utcnow(),
+            "current_period_end": datetime.fromisoformat(subscription_data.get('expired_at').replace('Z', '+00:00')) if subscription_data.get('expired_at') else None,
+            "plan_id": product_data.get('product_id'),
+            "plan_name": product_data.get('name'),
+            "product_id": product_data.get('product_id'),
+            "price_amount": float(product_data.get('amount', 0)) / 100,
+            "currency": product_data.get('currency', 'usd').lower(),
             "interval": "month",  # Default
-            "created_at": datetime.fromisoformat(subscription_data.get('created_at').replace('Z', '+00:00')) if subscription_data.get('created_at') else datetime.utcnow(),
+            "created_at": datetime.fromisoformat(subscription_data.get('started_at').replace('Z', '+00:00')) if subscription_data.get('started_at') else datetime.utcnow(),
             "cancel_at_period_end": False,
             "canceled_at": None,
             "ended_at": None,
@@ -286,7 +319,7 @@ async def _handle_solidgate_subscription_created(webhook_data: dict, event_id: s
             "latest_invoice": None,
             "collection_method": "charge_automatically",
             "default_payment_method": None,
-            "billing_cycle_anchor": datetime.fromisoformat(subscription_data.get('created_at').replace('Z', '+00:00')) if subscription_data.get('created_at') else datetime.utcnow(),
+            "billing_cycle_anchor": datetime.fromisoformat(subscription_data.get('started_at').replace('Z', '+00:00')) if subscription_data.get('started_at') else datetime.utcnow(),
             "updated_at": datetime.utcnow()
         }
         
@@ -314,7 +347,7 @@ async def _handle_solidgate_subscription_activated(webhook_data: dict, event_id:
     """Handle subscription activation (callback_type: active) from Solidgate"""
     try:
         subscription_data = webhook_data.get('subscription', {})
-        subscription_id = subscription_data.get('subscription_id') or subscription_data.get('id')
+        subscription_id = subscription_data.get('id') or subscription_data.get('subscription_id')
         
         if not subscription_id:
             print("No subscription ID found in Solidgate subscription activated webhook")
@@ -325,7 +358,7 @@ async def _handle_solidgate_subscription_activated(webhook_data: dict, event_id:
             {"subscription_id": subscription_id},
             {"$set": {
                 "status": "active",
-                "current_period_start": datetime.fromisoformat(subscription_data.get('activated_at').replace('Z', '+00:00')) if subscription_data.get('activated_at') else datetime.utcnow(),
+                "current_period_start": datetime.fromisoformat(subscription_data.get('started_at').replace('Z', '+00:00')) if subscription_data.get('started_at') else datetime.utcnow(),
                 "current_period_end": datetime.fromisoformat(subscription_data.get('expired_at').replace('Z', '+00:00')) if subscription_data.get('expired_at') else datetime.utcnow() + timedelta(days=30),
                 "updated_at": datetime.utcnow()
             }}
@@ -440,6 +473,113 @@ async def _handle_solidgate_subscription_renewed(webhook_data: dict, event_id: s
     except Exception as e:
         print(f"Error handling Solidgate subscription renewal: {e}")
 
+def _run_fraud_detection(transaction_data):
+    """Run fraud detection for transaction"""
+    try:
+        from predictions.fraud import run_fraud_prediction
+        from models.schemas import TransactionRequest
+        
+        # Prepare fraud detection request
+        fraud_request = TransactionRequest(
+            amount=transaction_data.get('amount', 0.0),
+            currency=transaction_data.get('currency', 'usd'),
+            email=transaction_data.get('email', ''),
+            ip_address=transaction_data.get('ip_address', ''),
+            card_country=transaction_data.get('card_country', ''),
+            billing_country=transaction_data.get('billing_country', ''),
+            card_brand=transaction_data.get('card_brand', ''),
+            funding_type=transaction_data.get('funding_type', ''),
+            fingerprint=transaction_data.get('fingerprint', ''),
+            risk_score=transaction_data.get('risk_score', 0),
+            three_d_secure=transaction_data.get('three_d_secure'),
+            cvc_check=transaction_data.get('cvc_check'),
+            address_line1_check=transaction_data.get('address_line1_check'),
+            postal_code_check=transaction_data.get('postal_code_check'),
+            outcome_type=transaction_data.get('outcome_type'),
+            seller_message=transaction_data.get('seller_message'),
+            network_status=transaction_data.get('network_status')
+        )
+        
+        # Run fraud prediction
+        fraud_result = run_fraud_prediction(fraud_request)
+        
+        if fraud_result and not fraud_result.get('error'):
+            # Store fraud result
+            db["fraud_results"].update_one(
+                {"transaction_id": transaction_data.get('transaction_id')},
+                {"$set": {
+                    "transaction_id": transaction_data.get('transaction_id'),
+                    "fraud_predicted": fraud_result.get('is_fraud', False),
+                    "confidence": fraud_result.get('confidence_score', 0),
+                    "risk_level": fraud_result.get('risk_level', 'medium'),
+                    "model_type": fraud_result.get('model_type', 'default'),
+                    "fraud_reasons": fraud_result.get('fraud_reasons', []),
+                    "created_at": datetime.utcnow()
+                }},
+                upsert=True
+            )
+            
+            return fraud_result
+        
+        return None
+        
+    except Exception as e:
+        print(f"Error in fraud detection: {e}")
+        return None
+
+def _run_chargeback_prediction(transaction_data):
+    """Run chargeback prediction for transaction"""
+    try:
+        from predictions.chargeback import predict_chargeback
+        from models.schemas import TransactionRequest
+        
+        # Prepare chargeback prediction request
+        chargeback_request = TransactionRequest(
+            amount=transaction_data.get('amount', 0.0),
+            currency=transaction_data.get('currency', 'usd'),
+            email=transaction_data.get('email', ''),
+            ip_address=transaction_data.get('ip_address', ''),
+            card_country=transaction_data.get('card_country', ''),
+            billing_country=transaction_data.get('billing_country', ''),
+            card_brand=transaction_data.get('card_brand', ''),
+            funding_type=transaction_data.get('funding_type', ''),
+            fingerprint=transaction_data.get('fingerprint', ''),
+            risk_score=transaction_data.get('risk_score', 0),
+            three_d_secure=transaction_data.get('three_d_secure'),
+            cvc_check=transaction_data.get('cvc_check'),
+            address_line1_check=transaction_data.get('address_line1_check'),
+            postal_code_check=transaction_data.get('postal_code_check'),
+            outcome_type=transaction_data.get('outcome_type'),
+            seller_message=transaction_data.get('seller_message'),
+            network_status=transaction_data.get('network_status')
+        )
+        
+        # Run chargeback prediction
+        chargeback_result = predict_chargeback(chargeback_request)
+        
+        if chargeback_result and not chargeback_result.get('error'):
+            # Store chargeback result
+            db["chargeback_predictions"].update_one(
+                {"transaction_id": transaction_data.get('transaction_id')},
+                {"$set": {
+                    "transaction_id": transaction_data.get('transaction_id'),
+                    "chargeback_predicted": chargeback_result.get('chargeback_predicted', False),
+                    "confidence": chargeback_result.get('confidence_score', 0),
+                    "chargeback_reason": chargeback_result.get('chargeback_reason', 'No specific reason'),
+                    "model_type": chargeback_result.get('model_type', 'default'),
+                    "created_at": datetime.utcnow()
+                }},
+                upsert=True
+            )
+            
+            return chargeback_result
+        
+        return None
+        
+    except Exception as e:
+        print(f"Error in chargeback prediction: {e}")
+        return None
+
 def _get_smart_routing_prediction(transaction_data):
     """Get smart routing prediction for transaction"""
     try:
@@ -513,24 +653,48 @@ def _get_subscription_revenue_prediction(subscription_data):
     """Get subscription revenue prediction"""
     try:
         # Load subscription models
-        ensemble_model = model_manager.get_model('subscription_ensemble')
-        scaler = model_manager.get_model('subscription_scaler')
+        ensemble_model = model_manager.get_model('subscription_ensemble_model')
+        scaler = model_manager.get_model('subscription_revenue_scaler')
         
         if not ensemble_model or not scaler:
             return {"predicted_revenue": subscription_data.get('price_amount', 0), "error": "Models not found"}
         
-        # Extract features (simplified version)
-        features = {
-            'account_age_days': subscription_data.get('account_age_days', 30),
-            'renewal_count': subscription_data.get('renewal_count', 1),
-            'average_subscription_value': subscription_data.get('price_amount', 100),
-            'high_value_customer': 1 if subscription_data.get('price_amount', 0) > 100 else 0,
-            'subscription_duration_days': subscription_data.get('subscription_duration_days', 30),
-            'is_weekend': 1 if datetime.utcnow().weekday() >= 5 else 0
-        }
+        # Extract features with defaults for all 23 expected features
+        account_age_days = subscription_data.get('account_age_days', 365)
+        renewal_count = subscription_data.get('renewal_count', 1)
+        average_subscription_value = subscription_data.get('price_amount', 50)
+        high_value_customer = 1 if average_subscription_value > 100 else 0
+        subscription_duration_days = subscription_data.get('subscription_duration_days', 30)
+        is_weekend = 1 if datetime.utcnow().weekday() >= 5 else 0
         
-        # Convert to array and scale
-        feature_array = np.array(list(features.values())).reshape(1, -1)
+        # Create complete 23-feature vector with defaults
+        feature_array = np.array([[
+            account_age_days,                    # 0: account_age_days
+            renewal_count,                       # 1: renewal_count
+            average_subscription_value,          # 2: average_subscription_value
+            high_value_customer,                 # 3: high_value_customer
+            subscription_duration_days,          # 4: subscription_duration_days
+            is_weekend,                          # 5: is_weekend
+            7.5,                                 # 6: customer_satisfaction (default)
+            0.95,                                # 7: payment_success_rate (default)
+            0.2,                                 # 8: churn_risk_score (default)
+            account_age_days / 30,               # 9: account_age_months
+            subscription_duration_days / 30,     # 10: subscription_age_months
+            1.0,                                 # 11: renewal_frequency (default)
+            1 if renewal_count <= 1 else 0,     # 12: is_new_customer
+            1 if renewal_count > 3 else 0,      # 13: is_established_customer
+            1 if average_subscription_value > 75 else 0,  # 14: is_high_engagement
+            average_subscription_value,          # 15: revenue_per_month
+            0.05,                                # 16: revenue_growth_rate (default)
+            0.1,                                 # 17: potential_upsell (default)
+            0.3,                                 # 18: risk_score (default)
+            0.9,                                 # 19: payment_reliability (default)
+            0.2,                                 # 20: support_burden (default)
+            is_weekend,                          # 21: weekend_activity
+            2 if average_subscription_value > 100 else (1 if average_subscription_value > 50 else 0)  # 22: satisfaction_tier
+        ]])
+        
+        # Scale features
         scaled_features = scaler.transform(feature_array)
         
         # Get prediction
@@ -539,7 +703,8 @@ def _get_subscription_revenue_prediction(subscription_data):
         return {
             "predicted_revenue": float(predicted_revenue),
             "current_revenue": subscription_data.get('price_amount', 0),
-            "growth_rate": (predicted_revenue - subscription_data.get('price_amount', 0)) / max(subscription_data.get('price_amount', 1), 1)
+            "growth_rate": (predicted_revenue - subscription_data.get('price_amount', 0)) / max(subscription_data.get('price_amount', 1), 1),
+            "features_used": 23
         }
         
     except Exception as e:

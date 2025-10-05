@@ -14,6 +14,9 @@ class Settings:
     MONGO_URI = os.getenv("MONGO_URI")
     DATABASE_NAME = "payment_intelligence"
     
+    # Redis Configuration
+    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    
     # Stripe Configuration
     STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
     STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
