@@ -91,10 +91,21 @@ cp .env.example .env  # Edit to add your Stripe/MongoDB config
 
 ### Quickstart
 
+#### Using Docker (Recommended)
 ```bash
-uvicorn app.main:app --reload
+# Build and run with Docker Compose
+make compose-up
+
+# Or for development with hot reload
+make compose-dev
 ```
-> The API will be available at [http://localhost:8000](http://localhost:8000)
+> The API will be available at [http://localhost:8010](http://localhost:8010)
+
+#### Manual Setup
+```bash
+uvicorn src.api.main:app --reload
+```
+> The API will be available at [http://localhost:8010](http://localhost:8010)
 
 ---
 
@@ -103,7 +114,7 @@ uvicorn app.main:app --reload
 ### Fraud Prediction
 
 ```bash
-curl -X POST http://localhost:8000/fraud/predict \
+curl -X POST http://localhost:8010/fraud/predict \
   -H "Content-Type: application/json" \
   -d '{"customer_id": "cus_xxx", "amount": 99.00, "currency": "USD"}'
 ```
@@ -111,7 +122,7 @@ curl -X POST http://localhost:8000/fraud/predict \
 **Python Example:**
 ```python
 import requests
-resp = requests.post("http://localhost:8000/fraud/predict", json={
+resp = requests.post("http://localhost:8010/fraud/predict", json={
     "customer_id": "cus_xxx",
     "amount": 99.00,
     "currency": "USD"
@@ -122,7 +133,7 @@ print(resp.json())
 ### Revenue Forecast
 
 ```bash
-curl http://localhost:8000/revenue/forecast?customer_id=cus_xxx
+curl http://localhost:8010/revenue/forecast?customer_id=cus_xxx
 ```
 
 _For full API reference and interactive docs, see [`/docs`](./docs) or open Swagger UI at `/docs` when running the server._
