@@ -1,313 +1,551 @@
-import os, json
+import os
+import json
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from pymongo import MongoClient
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
 
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.model_selection import StratifiedKFold, cross_val_score, TimeSeriesSplit
 from sklearn.metrics import (
     classification_report, confusion_matrix, accuracy_score,
     precision_score, recall_score, f1_score, roc_auc_score,
     average_precision_score, precision_recall_curve
 )
-from sklearn.preprocessing import StandardScaler
-from imblearn.over_sampling import RandomOverSampler
+from sklearn.preprocessing import StandardScaler, RobustScaler, LabelEncoder
+from sklearn.ensemble import IsolationForest, VotingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from imblearn.over_sampling import SMOTE, BorderlineSMOTE, RandomOverSampler
+from imblearn.under_sampling import EditedNearestNeighbours
 from imblearn.pipeline import Pipeline as ImbPipeline
 from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
 import joblib
 import matplotlib.pyplot as plt
+import seaborn as sns
 
-# ---------------------------
-# Helpers (past-only, index-safe)
-# ---------------------------
-def ensure_cols(df: pd.DataFrame, cols, default=np.nan, astype=None):
-    for c in cols:
-        if c not in df.columns:
-            df[c] = default
-        if astype is not None:
-            df[c] = df[c].astype(astype)
-    return df
+from scipy import stats
+from scipy.spatial.distance import pdist, squareform
+import networkx as nx
 
-def rolling_count_seconds(times: pd.Series, window_s: int) -> pd.Series:
-    """For a monotonically increasing datetime Series, return count of prior rows in sliding window."""
-    times = pd.to_datetime(times)
-    idx = times.index
-    out = np.zeros(len(times), dtype=np.int32)
-    j = 0
-    for i in range(len(times)):
-        t_hi = times.iloc[i]
-        t_lo = t_hi - pd.Timedelta(seconds=window_s)
-        while j < i and times.iloc[j] < t_lo:
-            j += 1
-        out[i] = i - j
-    return pd.Series(out, index=idx)
 
-def domain_risk(email: str, common_domains: set) -> int:
-    dom = str(email).split("@")[-1].lower() if "@" in str(email) else "unknown"
-    return 0 if dom in common_domains else 1
+class ChargebackPredictionModel:
+    """Predicts chargeback risk for payment transactions"""
+    
+    def __init__(self):
+        self.common_domains = {
+            "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com",
+            "aol.com", "protonmail.com", "zoho.com", "mail.com", "gmx.com"
+        }
+        self.disposable_domains = {
+            "mailinator", "10minutemail", "guerrillamail", "tempmail", "yopmail", 
+            "trashmail", "temp-mail", "throwaway"
+        }
+        
+    def ensure_cols(self, df: pd.DataFrame, cols, default=np.nan, astype=None):
+        """Ensure columns exist in DataFrame"""
+        for c in cols:
+            if c not in df.columns:
+                df[c] = default
+            if astype is not None:
+                df[c] = df[c].astype(astype)
+        return df
 
-# ---------------------------
-# 0) Load data
-# ---------------------------
-load_dotenv()
-MONGO_URI = os.getenv("MONGO_URI")
-if not MONGO_URI:
-    raise ValueError("Missing MONGO_URI in environment.")
+    def rolling_count_seconds(self, times: pd.Series, window_s: int) -> pd.Series:
+        """For a monotonically increasing datetime Series, return count of prior rows in sliding window."""
+        times = pd.to_datetime(times)
+        idx = times.index
+        out = np.zeros(len(times), dtype=np.int32)
+        j = 0
+        for i in range(len(times)):
+            t_hi = times.iloc[i]
+            t_lo = t_hi - pd.Timedelta(seconds=window_s)
+            while j < i and times.iloc[j] < t_lo:
+                j += 1
+            out[i] = i - j
+        return pd.Series(out, index=idx)
 
-client = MongoClient(MONGO_URI)
-db = client["payment_intelligence"]
-tx = pd.DataFrame(db["transactions"].find())
-if tx.empty:
-    raise ValueError("No transactions found.")
-if "created_at" not in tx.columns:
-    raise ValueError("transactions.created_at is required.")
+    def domain_risk(self, email: str) -> int:
+        """Calculate email domain risk score"""
+        dom = str(email).split("@")[-1].lower() if "@" in str(email) else "unknown"
+        return 0 if dom in self.common_domains else (2 if any(d in dom for d in self.disposable_domains) else 1)
 
-# ---------------------------
-# 1) Basic cleaning
-# ---------------------------
-tx["created_at"] = pd.to_datetime(tx["created_at"], errors="coerce")
-tx = tx.dropna(subset=["created_at"]).sort_values("created_at").reset_index(drop=True)
+    def create_temporal_features(self, df):
+        """Extract time-based features from transaction data"""
+        df = df.copy()
+        df['created_at'] = pd.to_datetime(df['created_at'])
+        
+        # Extract time components
+        df['hour'] = df['created_at'].dt.hour
+        df['day_of_week'] = df['created_at'].dt.dayofweek
+        df['day_of_month'] = df['created_at'].dt.day
+        df['month'] = df['created_at'].dt.month
+        df['quarter'] = df['created_at'].dt.quarter
+        df['is_weekend'] = (df['created_at'].dt.weekday >= 5).astype(int)
+        df['is_business_hours'] = ((df['hour'] >= 9) & (df['hour'] <= 17)).astype(int)
+        
+        # Convert time features to cyclical format
+        df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+        df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+        df['day_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
+        df['day_cos'] = np.cos(2 * np.pi * df['day_of_week'] / 7)
+        df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
+        df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
+        
+        # Business calendar features
+        df['is_holiday_season'] = df['month'].isin([11, 12]).astype(int)
+        df['is_month_end'] = (df['day_of_month'] >= 25).astype(int)
+        df['is_quarter_end'] = df['month'].isin([3, 6, 9, 12]).astype(int)
+        
+        return df
 
-needed = [
-    "transaction_id","email","amount","card_country","billing_address_country",
-    "risk_score","disputed","refunded","ip_address","fingerprint","gateway"
-]
-tx = ensure_cols(tx, needed)
-tx["email"] = tx["email"].astype(str).fillna("unknown@example.com")
-tx["amount"] = pd.to_numeric(tx["amount"], errors="coerce").fillna(0.0)
-tx["risk_score"] = pd.to_numeric(tx["risk_score"], errors="coerce").fillna(0.0)
-tx["disputed"] = pd.to_numeric(tx["disputed"], errors="coerce").fillna(0).astype(int)
-tx["refunded"] = pd.to_numeric(tx["refunded"], errors="coerce").fillna(0).astype(int)
-tx["card_country"] = tx["card_country"].astype(str).fillna("UNK")
-tx["billing_address_country"] = tx["billing_address_country"].astype(str).fillna("UNK")
-tx["ip_address"] = tx["ip_address"].astype(str).fillna("0.0.0.0")
-tx["fingerprint"] = tx["fingerprint"].astype(str).fillna("unknown")
-tx["gateway"] = tx["gateway"].astype(str).fillna("unknown")
+    def create_customer_lifecycle_features(self, df):
+        """Extract customer relationship and behavior patterns"""
+        df = df.copy()
+        df = df.sort_values(['email', 'created_at']).reset_index(drop=True)
+        
+        # Customer tenure
+        first_transaction = df.groupby('email')['created_at'].transform('min')
+        df['customer_tenure_days'] = (df['created_at'] - first_transaction).dt.days
+        df['is_new_customer'] = (df['customer_tenure_days'] <= 30).astype(int)
+        df['is_early_customer'] = (df['customer_tenure_days'] <= 90).astype(int)
+        
+        # Transaction sequence
+        df['transaction_sequence'] = df.groupby('email').cumcount() + 1
+        df['is_first_transaction'] = (df['transaction_sequence'] == 1).astype(int)
+        
+        # Customer velocity patterns
+        df['transactions_per_day'] = df['transaction_sequence'] / (df['customer_tenure_days'] + 1)
+        df['avg_days_between_transactions'] = df['customer_tenure_days'] / (df['transaction_sequence'] + 1)
+        
+        return df
 
-# ---------------------------
-# 2) Leakage-safe feature engineering (PAST ONLY)
-# ---------------------------
-# Sort by entity+time for cumulative “past” features
-tx = tx.sort_values(["email","created_at"]).reset_index(drop=True)
+    def create_velocity_features(self, df):
+        """Calculate transaction frequency patterns over time windows"""
+        df = df.copy()
+        df = df.sort_values(['email', 'created_at']).reset_index(drop=True)
+        
+        # Rolling windows for different time periods
+        windows = {
+            '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000
+        }
+        
+        for window_name, window_sec in windows.items():
+            df[f'transactions_{window_name}'] = 0
+            df[f'amount_sum_{window_name}'] = 0.0
+            df[f'amount_avg_{window_name}'] = 0.0
+            df[f'amount_max_{window_name}'] = 0.0
+            df[f'chargebacks_{window_name}'] = 0
+            df[f'refunds_{window_name}'] = 0
+            
+            for email in df['email'].unique():
+                email_mask = df['email'] == email
+                email_data = df[email_mask].copy()
+                
+                if len(email_data) > 1:
+                    for i, (idx, row) in enumerate(email_data.iterrows()):
+                        current_time = row['created_at']
+                        window_start = current_time - pd.Timedelta(seconds=window_sec)
+                        
+                        # Count transactions in window
+                        window_mask = (email_data['created_at'] >= window_start) & \
+                                    (email_data['created_at'] < current_time)
+                        window_data = email_data[window_mask]
+                        
+                        df.loc[idx, f'transactions_{window_name}'] = len(window_data)
+                        if len(window_data) > 0:
+                            df.loc[idx, f'amount_sum_{window_name}'] = window_data['amount'].sum()
+                            df.loc[idx, f'amount_avg_{window_name}'] = window_data['amount'].mean()
+                            df.loc[idx, f'amount_max_{window_name}'] = window_data['amount'].max()
+                            df.loc[idx, f'chargebacks_{window_name}'] = window_data['disputed'].sum()
+                            df.loc[idx, f'refunds_{window_name}'] = window_data['refunded'].sum()
+        
+        return df
 
-# Time/amount basics
-tx["amount_log"] = np.log1p(tx["amount"])
-tx["hour"] = tx["created_at"].dt.hour
-tx["is_weekend"] = (tx["created_at"].dt.weekday >= 5).astype(int)
+    def create_behavioral_features(self, df):
+        """Extract behavioral indicators from transaction data"""
+        df = df.copy()
+        
+        # Email domain analysis
+        df['email_domain'] = df['email'].str.split('@').str[1].str.lower()
+        df['email_domain_risk'] = df['email'].apply(self.domain_risk)
+        df['email_length'] = df['email'].str.len()
+        df['email_has_numbers'] = df['email'].str.contains(r'\d').astype(int)
+        df['email_has_special_chars'] = df['email'].str.contains(r'[._-]').astype(int)
+        
+        # Amount-based features
+        df['amount_log'] = np.log1p(df['amount'])
+        df['amount_sqrt'] = np.sqrt(df['amount'])
+        df['amount_reciprocal'] = 1 / (df['amount'] + 1)
+        
+        # Country and location features
+        df['country_mismatch'] = (df['card_country'] != df['billing_address_country']).astype(int)
+        df['is_cross_border'] = df['country_mismatch']
+        
+        # Device and IP features
+        df['ip_is_private'] = df['ip_address'].str.startswith(('10.', '172.', '192.168.')).astype(int)
+        df['fingerprint_length'] = df['fingerprint'].str.len()
+        
+        # Customer history features
+        df = df.sort_values(['email', 'created_at']).reset_index(drop=True)
+        
+        # Past refunds and chargebacks
+        df['past_refund_count'] = df.groupby('email')['refunded'].shift().fillna(0).groupby(df['email']).cumsum()
+        df['past_chargeback_count'] = df.groupby('email')['disputed'].shift().fillna(0).groupby(df['email']).cumsum()
+        df['past_transaction_count'] = df.groupby('email').cumcount()
+        
+        # Ratios
+        df['refund_ratio'] = df['past_refund_count'] / (df['past_transaction_count'] + 1)
+        df['chargeback_ratio'] = df['past_chargeback_count'] / (df['past_transaction_count'] + 1)
+        
+        # Amount consistency
+        df['past_avg_amount'] = df.groupby('email')['amount'].shift().groupby(df['email']).expanding().mean().reset_index(level=0, drop=True).fillna(0)
+        df['amount_deviation'] = (df['amount'] - df['past_avg_amount']).abs()
+        df['amount_deviation_ratio'] = df['amount_deviation'] / (df['past_avg_amount'] + 1)
+        
+        return df
 
-# Past behavior per email
-tx["past_tx_count_email"] = tx.groupby("email").cumcount()
+    def create_network_features(self, df):
+        """Analyze device and IP sharing patterns"""
+        df = df.copy()
+        
+        # IP sharing network
+        ip_emails = df.groupby('ip_address')['email'].apply(set).to_dict()
+        df['ip_email_connections'] = df['ip_address'].map(
+            lambda x: len(ip_emails.get(x, set()))
+        )
+        
+        # Email sharing network
+        email_ips = df.groupby('email')['ip_address'].apply(set).to_dict()
+        df['email_ip_connections'] = df['email'].map(
+            lambda x: len(email_ips.get(x, set()))
+        )
+        
+        # Device fingerprint sharing
+        fp_emails = df.groupby('fingerprint')['email'].apply(set).to_dict()
+        df['fp_email_connections'] = df['fingerprint'].map(
+            lambda x: len(fp_emails.get(x, set()))
+        )
+        
+        # Network risk scores
+        ip_chargeback_rates = df.groupby('ip_address')['disputed'].mean().to_dict()
+        fp_chargeback_rates = df.groupby('fingerprint')['disputed'].mean().to_dict()
+        
+        df['ip_chargeback_rate'] = df['ip_address'].map(ip_chargeback_rates).fillna(0)
+        df['fp_chargeback_rate'] = df['fingerprint'].map(fp_chargeback_rates).fillna(0)
+        
+        return df
 
-# Time between user transactions (past-only via diff)
-tx["time_between_transactions"] = (
-    tx.groupby("email")["created_at"].diff().dt.total_seconds().fillna(999999.0)
-)
+    def create_anomaly_features(self, df):
+        """Detect statistical outliers in transaction patterns"""
+        df = df.copy()
+        
+        # Amount anomalies
+        df['amount_zscore'] = np.abs(stats.zscore(df['amount']))
+        df['amount_iqr'] = self._iqr_outlier_score(df['amount'])
+        
+        # Time anomalies
+        df['hour_anomaly'] = np.abs(df['hour'] - df['hour'].median())
+        
+        # Country anomalies (frequency-based)
+        country_counts = df['card_country'].value_counts()
+        df['country_frequency'] = df['card_country'].map(country_counts)
+        df['country_anomaly'] = 1 / (df['country_frequency'] + 1)
+        
+        # Customer behavior anomalies
+        df['refund_ratio_anomaly'] = self._iqr_outlier_score(df['refund_ratio'])
+        df['chargeback_ratio_anomaly'] = self._iqr_outlier_score(df['chargeback_ratio'])
+        
+        return df
 
-# Rolling velocity counts (10m/1h/24h) per email
-windows = [(600, "10m"), (3600, "1h"), (86400, "24h")]
-email_groups = tx.groupby("email").groups
-for win_s, name in windows:
-    counts = pd.Series(0, index=tx.index, dtype="int32")
-    for _, idx in email_groups.items():
-        s = tx.loc[idx, "created_at"]
-        c = rolling_count_seconds(s, win_s)  # counts of prior events in window
-        counts.loc[idx] = c.values
-    tx[f"past_tx_count_{name}"] = counts
+    def _iqr_outlier_score(self, series):
+        """Calculate IQR-based outlier score"""
+        Q1 = series.quantile(0.25)
+        Q3 = series.quantile(0.75)
+        IQR = Q3 - Q1
+        return np.abs(series - series.median()) / (IQR + 1e-6)
 
-# Past rolling averages (shift then expanding mean) – refunds and amounts
-tx["past_refund_count"] = (
-    tx.groupby("email")["refunded"].shift(fill_value=0)
-      .groupby(tx["email"]).cumsum()
-)
-tx["past_tx_count_for_ratio"] = tx["past_tx_count_email"].replace(0, np.nan)
-tx["customer_refund_ratio_past"] = (tx["past_refund_count"] / tx["past_tx_count_for_ratio"]).fillna(0.0)
+    def prepare_data(self, df):
+        """Clean and prepare transaction data for model training"""
+        print("Processing transaction data for chargeback prediction...")
+        
+        # Basic cleaning
+        df = df.dropna(subset=['created_at']).copy()
+        df['created_at'] = pd.to_datetime(df['created_at'])
+        df = df.sort_values('created_at').reset_index(drop=True)
+        
+        # Fill missing values
+        df['email'] = df['email'].fillna('unknown@example.com')
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
+        df['risk_score'] = pd.to_numeric(df['risk_score'], errors='coerce').fillna(0.0)
+        df['disputed'] = pd.to_numeric(df['disputed'], errors='coerce').fillna(0).astype(int)
+        df['refunded'] = pd.to_numeric(df['refunded'], errors='coerce').fillna(0).astype(int)
+        df['card_country'] = df['card_country'].fillna('UNK')
+        df['billing_address_country'] = df['billing_address_country'].fillna('UNK')
+        df['ip_address'] = df['ip_address'].fillna('0.0.0.0')
+        df['fingerprint'] = df['fingerprint'].fillna('unknown')
+        
+        # Create all feature sets
+        df = self.create_temporal_features(df)
+        df = self.create_customer_lifecycle_features(df)
+        df = self.create_velocity_features(df)
+        df = self.create_behavioral_features(df)
+        df = self.create_network_features(df)
+        df = self.create_anomaly_features(df)
+        
+        print(f"Feature engineering complete. Created {len(df.columns)} features.")
+        return df
 
-tx["past_avg_amount"] = (
-    tx.groupby("email")["amount"].shift()
-      .groupby(tx["email"]).expanding().mean()
-      .reset_index(level=0, drop=True)
-      .fillna(0.0)
-)
-tx["transaction_amount_diff"] = (tx["amount"] - tx["past_avg_amount"]).abs()
+    def create_ensemble_models(self):
+        """Initialize multiple ML models for ensemble prediction"""
+        
+        # Base models with different characteristics
+        models = {
+            'xgboost': XGBClassifier(
+                n_estimators=1200,
+                max_depth=8,
+                learning_rate=0.05,
+                subsample=0.9,
+                colsample_bytree=0.9,
+                tree_method="hist",
+                random_state=42,
+                n_jobs=-1
+            ),
+            'lightgbm': LGBMClassifier(
+                n_estimators=1200,
+                max_depth=8,
+                learning_rate=0.05,
+                subsample=0.9,
+                colsample_bytree=0.9,
+                random_state=42,
+                n_jobs=-1,
+                verbose=-1
+            ),
+            'random_forest': RandomForestClassifier(
+                n_estimators=600,
+                max_depth=12,
+                min_samples_split=10,
+                min_samples_leaf=5,
+                random_state=42,
+                n_jobs=-1
+            ),
+            'logistic_regression': LogisticRegression(
+                C=0.1,
+                max_iter=1000,
+                random_state=42,
+                n_jobs=-1
+            )
+        }
+        
+        return models
 
-# “Past chargebacks” (shift then cumsum)
-tx["past_chargebacks"] = (
-    tx.groupby("email")["disputed"].shift(fill_value=0)
-      .groupby(tx["email"]).cumsum()
-)
+    def train_ensemble(self, X_train, y_train, X_val, y_val):
+        """Train multiple models and combine their predictions"""
+        
+        models = self.create_ensemble_models()
+        trained_models = {}
+        
+        # Different sampling strategies for different models
+        sampling_strategies = {
+            'xgboost': SMOTE(random_state=42),
+            'lightgbm': BorderlineSMOTE(random_state=42),
+            'random_forest': EditedNearestNeighbours(),
+            'logistic_regression': SMOTE(random_state=42)
+        }
+        
+        for name, model in models.items():
+            print(f"🔄 Training {name}...")
+            
+            # Create pipeline with sampling and scaling
+            pipeline = ImbPipeline([
+                ('sampling', sampling_strategies[name]),
+                ('scaler', RobustScaler()),
+                ('model', model)
+            ])
+            
+            # Train model
+            pipeline.fit(X_train, y_train)
+            
+            # Validate
+            y_val_pred = pipeline.predict_proba(X_val)[:, 1]
+            val_auc = roc_auc_score(y_val, y_val_pred)
+            val_pr_auc = average_precision_score(y_val, y_val_pred)
+            
+            print(f"✅ {name} - Val AUC: {val_auc:.4f}, Val PR-AUC: {val_pr_auc:.4f}")
+            
+            trained_models[name] = pipeline
+        
+        # Create voting classifier
+        voting_models = [(name, model) for name, model in trained_models.items()]
+        ensemble = VotingClassifier(
+            estimators=voting_models,
+            voting='soft'
+        )
+        
+        # Train ensemble on full training data
+        ensemble.fit(X_train, y_train)
+        
+        # Final validation
+        y_val_ensemble = ensemble.predict_proba(X_val)[:, 1]
+        ensemble_auc = roc_auc_score(y_val, y_val_ensemble)
+        ensemble_pr_auc = average_precision_score(y_val, y_val_ensemble)
+        
+        print(f"🎯 Ensemble - Val AUC: {ensemble_auc:.4f}, Val PR-AUC: {ensemble_pr_auc:.4f}")
+        
+        return ensemble, trained_models
 
-# Country mismatch (current info; no leakage)
-tx["country_mismatch"] = (tx["card_country"] != tx["billing_address_country"]).astype(int)
+    def train(self):
+        """Main training function"""
+        
+        # Load data
+        load_dotenv()
+        MONGO_URI = os.getenv("MONGO_URI")
+        if not MONGO_URI:
+            raise ValueError("Missing MONGO_URI in environment.")
+        
+        client = MongoClient(MONGO_URI)
+        db = client["payment_intelligence"]
+        
+        print("📊 Loading transaction data...")
+        df = pd.DataFrame(db["transactions"].find())
+        
+        if df.empty:
+            raise ValueError("No transactions found.")
+        
+        # Prepare data
+        df = self.prepare_data(df)
+        
+        # Temporal split (more realistic for chargeback prediction)
+        split_date = df['created_at'].quantile(0.8)
+        train_mask = df['created_at'] <= split_date
+        test_mask = df['created_at'] > split_date
+        
+        train_df = df[train_mask].copy()
+        test_df = df[test_mask].copy()
+        
+        # Further split training data
+        val_split_date = train_df['created_at'].quantile(0.9)
+        train_mask_val = train_df['created_at'] <= val_split_date
+        val_mask = train_df['created_at'] > val_split_date
+        
+        X_train = train_df[train_mask_val].drop(['disputed', 'created_at'], axis=1)
+        y_train = train_df[train_mask_val]['disputed']
+        X_val = train_df[val_mask].drop(['disputed', 'created_at'], axis=1)
+        y_val = train_df[val_mask]['disputed']
+        X_test = test_df.drop(['disputed', 'created_at'], axis=1)
+        y_test = test_df['disputed']
+        
+        print(f"📈 Data split - Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
+        print(f"🎯 Chargeback rate - Train: {y_train.mean():.3f}, Val: {y_val.mean():.3f}, Test: {y_test.mean():.3f}")
+        
+        # Convert to numeric and fill NaN
+        X_train = X_train.apply(pd.to_numeric, errors='coerce').fillna(0)
+        X_val = X_val.apply(pd.to_numeric, errors='coerce').fillna(0)
+        X_test = X_test.apply(pd.to_numeric, errors='coerce').fillna(0)
+        
+        # Train ensemble
+        ensemble, individual_models = self.train_ensemble(X_train, y_train, X_val, y_val)
+        
+        # Final evaluation
+        print("\n🎯 Final Model Evaluation:")
+        y_test_pred = ensemble.predict_proba(X_test)[:, 1]
+        
+        # Find optimal threshold
+        precision, recall, thresholds = precision_recall_curve(y_test, y_test_pred)
+        f1_scores = 2 * (precision * recall) / (precision + recall + 1e-9)
+        optimal_threshold = thresholds[np.argmax(f1_scores)]
+        
+        y_test_pred_binary = (y_test_pred >= optimal_threshold).astype(int)
+        
+        metrics = {
+            'accuracy': accuracy_score(y_test, y_test_pred_binary),
+            'precision': precision_score(y_test, y_test_pred_binary, zero_division=0),
+            'recall': recall_score(y_test, y_test_pred_binary, zero_division=0),
+            'f1': f1_score(y_test, y_test_pred_binary, zero_division=0),
+            'roc_auc': roc_auc_score(y_test, y_test_pred),
+            'pr_auc': average_precision_score(y_test, y_test_pred),
+            'optimal_threshold': optimal_threshold
+        }
+        
+        print("\n📊 Test Set Performance:")
+        for metric, value in metrics.items():
+            print(f"{metric:>15}: {value:.4f}")
+        
+        # Feature importance analysis
+        self._analyze_feature_importance(ensemble, X_train.columns, X_train)
+        
+        # Save models and metadata
+        self._save_models(ensemble, individual_models, list(X_train.columns), metrics)
+        
+        return ensemble, metrics
 
-# IP/fingerprint reuse BEFORE current tx (index-safe via cumcount after sorting within key)
-tx = tx.sort_values(["ip_address","created_at"]).reset_index(drop=True)
-tx["ip_address_reuse_before"] = tx.groupby("ip_address").cumcount()
+    def _analyze_feature_importance(self, ensemble, features, X_train):
+        """Analyze and visualize feature importance"""
+        
+        # Get feature importance from ensemble models
+        importances = {}
+        for name, model in ensemble.named_estimators_.items():
+            if hasattr(model.named_steps['model'], 'feature_importances_'):
+                importances[name] = model.named_steps['model'].feature_importances_
+            elif hasattr(model.named_steps['model'], 'coef_'):
+                importances[name] = np.abs(model.named_steps['model'].coef_[0])
+        
+        # Average importance across models
+        if importances:
+            avg_importance = np.mean(list(importances.values()), axis=0)
+            feature_importance = pd.DataFrame({
+                'feature': features,
+                'importance': avg_importance
+            }).sort_values('importance', ascending=False)
+            
+            # Plot top features
+            plt.figure(figsize=(12, 8))
+            top_features = feature_importance.head(20)
+            sns.barplot(data=top_features, y='feature', x='importance')
+            plt.title('Top 20 Feature Importances (Ensemble Average)')
+            plt.tight_layout()
+            
+            os.makedirs("/src/data/models", exist_ok=True)
+            plt.savefig("/src/data/models/chargeback_prediction_feature_importance.png", dpi=300, bbox_inches='tight')
+            plt.show()
 
-tx = tx.sort_values(["fingerprint","created_at"]).reset_index(drop=True)
-tx["fingerprint_reuse_before"] = tx.groupby("fingerprint").cumcount()
+    def _save_models(self, ensemble, individual_models, features, metrics):
+        """Save trained models and metadata"""
+        
+        os.makedirs("/src/data/models", exist_ok=True)
+        
+        # Save ensemble model
+        joblib.dump(ensemble, "/src/data/models/chargeback_prediction_pipeline.pkl")
+        
+        # Save individual models
+        for name, model in individual_models.items():
+            joblib.dump(model, f"/src/data/models/chargeback_prediction_{name}.pkl")
+        
+        # Save metadata
+        metadata = {
+            "model_version": "2.0.0",
+            "model_type": "ensemble_chargeback_prediction",
+            "created_at": datetime.now().isoformat(),
+            "features_used": features,
+            "metrics": metrics,
+            "models_in_ensemble": list(individual_models.keys()),
+            "ensemble_method": "voting_classifier_soft"
+        }
+        
+        with open("/src/data/models/chargeback_prediction_metadata.json", "w") as f:
+            json.dump(metadata, f, indent=4)
+        
+        print("✅ Chargeback prediction models saved successfully!")
 
-tx = tx.sort_values(["fingerprint","ip_address","created_at"]).reset_index(drop=True)
-tx["device_ip_pair_reuse_before"] = tx.groupby(["fingerprint","ip_address"]).cumcount()
 
-# Back to global chronological order for splitting later
-tx = tx.sort_values("created_at").reset_index(drop=True)
+def train():
+    """Train chargeback prediction model"""
+    predictor = ChargebackPredictionModel()
+    return predictor.train()
 
-# Email domain risk
-COMMON_DOMAINS = {
-    "gmail.com","yahoo.com","hotmail.com","outlook.com","icloud.com",
-    "aol.com","protonmail.com","zoho.com","mail.com","gmx.com"
-}
-tx["email_domain_risk"] = tx["email"].apply(lambda e: domain_risk(e, COMMON_DOMAINS)).astype(int)
 
-# OPTIONAL: If you have ip_country column, you can add:
-# if "ip_country" in tx.columns:
-#     tx["ip_country_mismatch"] = (tx["card_country"] != tx["ip_country"]).astype(int)
-
-# ---------------------------
-# 3) Labels & features
-# ---------------------------
-y = tx["disputed"].astype(int)
-
-feature_cols = [
-    "amount_log","hour","is_weekend",
-    "past_tx_count_email","past_tx_count_10m","past_tx_count_1h","past_tx_count_24h",
-    "time_between_transactions",
-    "past_refund_count","customer_refund_ratio_past",
-    "past_avg_amount","transaction_amount_diff",
-    "past_chargebacks",
-    "country_mismatch",
-    "ip_address_reuse_before","fingerprint_reuse_before","device_ip_pair_reuse_before",
-    "email_domain_risk",
-    # Use risk_score only if it is a pre-authorization signal; otherwise comment it out.
-    "risk_score"
-]
-feature_cols = [c for c in feature_cols if c in tx.columns]
-X = tx[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-
-# ---------------------------
-# 4) Temporal split: train (old), val (recent), test (future)
-# ---------------------------
-cut_time_test = tx["created_at"].quantile(0.80)
-train_mask = tx["created_at"] <= cut_time_test
-test_mask  = tx["created_at"]  > cut_time_test
-
-X_train_full, y_train_full = X[train_mask], y[train_mask]
-X_test, y_test = X[test_mask], y[test_mask]
-
-# validation = last 10% of train period
-cut_time_val = tx.loc[train_mask, "created_at"].quantile(0.90)
-val_mask = (tx["created_at"] > cut_time_val) & train_mask
-tr_mask  = (tx["created_at"] <= cut_time_val) & train_mask
-
-X_train, y_train = X[tr_mask], y[tr_mask]
-X_val,   y_val   = X[val_mask], y[val_mask]
-
-print(f"Sizes -> Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
-
-# ---------------------------
-# 5) Pipeline + CV (oversample/scale inside folds)
-# ---------------------------
-pipe = ImbPipeline(steps=[
-    ("ros",    RandomOverSampler(random_state=42)),
-    ("scaler", StandardScaler()),
-    ("xgb",    XGBClassifier(
-        n_estimators=900,
-        max_depth=8,
-        learning_rate=0.05,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        tree_method="hist",
-        random_state=42,
-        n_jobs=-1
-    ))
-])
-
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-cv_scores = cross_val_score(pipe, X_train, y_train, cv=cv, scoring="average_precision")
-print(f"CV PR-AUC (train-only): mean={cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
-
-# Fit on train and tune threshold on validation
-pipe.fit(X_train, y_train)
-y_val_proba = pipe.predict_proba(X_val)[:, 1]
-
-p, r, t = precision_recall_curve(y_val, y_val_proba)
-f1s = (2 * p * r) / (p + r + 1e-9)
-best_idx = int(np.nanargmax(f1s)) if len(f1s) else 0
-best_threshold = float(t[max(best_idx-1, 0)]) if len(t) else 0.5
-print(f"Chosen threshold (val F1): {best_threshold:.3f}")
-
-# ---------------------------
-# 6) Final evaluation on hold-out test
-# ---------------------------
-y_test_proba = pipe.predict_proba(X_test)[:, 1]
-y_test_pred  = (y_test_proba >= best_threshold).astype(int)
-
-metrics = {
-    "accuracy":  accuracy_score(y_test, y_test_pred) if len(y_test) else float("nan"),
-    "precision": precision_score(y_test, y_test_pred, zero_division=0) if len(y_test) else float("nan"),
-    "recall":    recall_score(y_test, y_test_pred, zero_division=0) if len(y_test) else float("nan"),
-    "f1":        f1_score(y_test, y_test_pred, zero_division=0) if len(y_test) else float("nan"),
-    "roc_auc":   roc_auc_score(y_test, y_test_proba) if len(np.unique(y_test))>1 else float("nan"),
-    "pr_auc":    average_precision_score(y_test, y_test_proba) if len(y_test) else float("nan"),
-}
-print("\n✅ HOLD-OUT TEST METRICS")
-for k, v in metrics.items():
-    print(f"{k:>9}: {v:.4f}")
-
-print("\nConfusion matrix (test):")
-print(confusion_matrix(y_test, y_test_pred) if len(y_test) else "N/A")
-
-print("\nClassification report (test):")
-print(classification_report(y_test, y_test_pred, zero_division=0) if len(y_test) else "N/A")
-
-# ---------------------------
-# 7) Plots (optional)
-# ---------------------------
-try:
-    from sklearn.metrics import RocCurveDisplay
-    if len(np.unique(y_test)) > 1 and len(y_test) > 0:
-        RocCurveDisplay.from_predictions(y_test, y_test_proba)
-        plt.title("ROC Curve (Test)")
-        plt.show()
-except Exception:
-    pass
-
-try:
-    xgb_model = pipe.named_steps["xgb"]
-    importances = xgb_model.feature_importances_
-    order = np.argsort(importances)[::-1]
-    plt.figure(figsize=(12, 6))
-    plt.title("Feature Importances (XGBoost)")
-    plt.bar(range(len(order)), importances[order])
-    plt.xticks(range(len(order)), [X.columns[i] for i in order], rotation=90)
-    plt.tight_layout()
-    os.makedirs("/src/data/models", exist_ok=True)
-    plt.savefig("/src/data/models/chargeback_feature_importance.png")
-    plt.show()
-except Exception:
-    pass
-
-# ---------------------------
-# 8) Save artifacts & metadata
-# ---------------------------
-os.makedirs("/src/data/models", exist_ok=True)
-joblib.dump(pipe, "/src/data/models/chargeback_pipeline.pkl")
-
-report = classification_report(y_test, y_test_pred, output_dict=True, zero_division=0) if len(y_test) else {}
-with open("/src/data/models/chargeback_report.json", "w") as f:
-    json.dump(report, f, indent=4)
-
-metadata = {
-    "model_version": "1.1.0",
-    "created_at": pd.Timestamp.now().isoformat(),
-    "features_used": list(X.columns),
-    "threshold": best_threshold,
-    "metrics_test": metrics,
-    "sizes": {"train": int(len(X_train)), "val": int(len(X_val)), "test": int(len(X_test))},
-    "cv_pr_auc_mean_train": float(cv_scores.mean()),
-    "cv_pr_auc_std_train": float(cv_scores.std()),
-}
-with open("/src/data/models/chargeback_metadata.json", "w") as f:
-    json.dump(metadata, f, indent=4)
-
-print("\n✅ Pipeline, report, and metadata saved to /src/data/models")
+if __name__ == "__main__":
+    train()

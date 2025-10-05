@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  ai-payment-intelligence:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      cache_from:
+        - ai-payment-intelligence:latest
+    image: ai-payment-intelligence
+    container_name: ai-payment-intelligence
+    restart: unless-stopped
+    ports:
+      - "8010:8010"
+    volumes:
+      # Mount model directory for persistence
+      - ./src/data/models:/src/data/models
+      # Mount raw data directory
+      - ./src/data/raw:/src/data/raw
+      # Mount logs directory
+      - ./src/logs:/src/logs
+    environment:
+      - PYTHONPATH=/src
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
+  # Optional: MongoDB service
+  mongodb:
+    image: mongo:7.0
+    container_name: ai-payment-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=password
+    # Only start if needed
+    profiles:
+      - mongodb
+
+volumes:
+  mongodb_data:
