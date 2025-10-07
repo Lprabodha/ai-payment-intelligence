@@ -100,3 +100,48 @@ def run_chargeback_predictions_job():
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/transactions/{txid}/recommendations")
+def get_transaction_recommendations(txid: str):
+    """Get comprehensive recommendations for a transaction"""
+    try:
+        from database.connection import db
+        from utils.recommendation_engine import recommendation_engine, enrich_transaction_with_history
+        
+        # Get transaction data
+        transaction = db["transactions"].find_one({"transaction_id": txid})
+        if not transaction:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+        
+        # Convert MongoDB _id to string for JSON serialization
+        if "_id" in transaction:
+            transaction["_id"] = str(transaction["_id"])
+        
+        # Get fraud prediction
+        fraud_pred = db["fraud_results"].find_one({"transaction_id": txid})
+        if fraud_pred and "_id" in fraud_pred:
+            fraud_pred["_id"] = str(fraud_pred["_id"])
+        
+        # Get chargeback prediction
+        chargeback_pred = db["chargeback_predictions"].find_one({"transaction_id": txid})
+        if chargeback_pred and "_id" in chargeback_pred:
+            chargeback_pred["_id"] = str(chargeback_pred["_id"])
+        
+        # Enrich transaction data with customer history and behavioral patterns
+        enriched_data = enrich_transaction_with_history(transaction, db)
+        
+        # Generate comprehensive recommendations with enriched data
+        recommendations = recommendation_engine.build_comprehensive_recommendations(
+            transaction, fraud_pred, chargeback_pred, enriched_data
+        )
+        
+        # Convert datetime objects to ISO format strings for JSON serialization
+        if "created_at" in recommendations:
+            recommendations["created_at"] = recommendations["created_at"].isoformat()
+        
+        return recommendations
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

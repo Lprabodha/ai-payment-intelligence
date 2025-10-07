@@ -72,7 +72,7 @@ def setup_logging():
         'uvicorn',
         'fastapi',
         'pymongo',
-        'tensorflow',
+        # 'tensorflow',  # Removed TensorFlow dependency
         'sklearn',
         'xgboost',
         'lightgbm'

@@ -15,7 +15,7 @@ class Settings:
     DATABASE_NAME = "payment_intelligence"
     
     # Redis Configuration
-    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    REDIS_URL = os.getenv("REDIS_URL")
     
     # Stripe Configuration
     STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")

@@ -5,7 +5,7 @@ import os
 import joblib
 import numpy as np
 from datetime import datetime, timedelta
-from tensorflow.keras.models import load_model
+# Removed TensorFlow import - using scikit-learn models only
 from config.settings import settings
 
 class ModelManager:
@@ -79,9 +79,10 @@ class ModelManager:
     def _load_routing_models(self):
         """Load smart routing models"""
         try:
-            routing_model_path = os.path.join(self.model_path, "smart_payment_routing_model.h5")
-            if os.path.exists(routing_model_path):
-                self.models['routing_model'] = load_model(routing_model_path)
+            # Try to load scikit-learn routing model
+            routing_model = self._load_model("smart_routing_rf.pkl")
+            if routing_model:
+                self.models['routing_model'] = routing_model
                 print("Loaded smart routing model")
             else:
                 print("Smart routing model not found")

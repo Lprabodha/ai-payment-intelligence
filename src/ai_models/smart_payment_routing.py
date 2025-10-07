@@ -4,10 +4,11 @@ import random
 import json
 from collections import deque
 from pymongo import MongoClient
-from tensorflow.keras import models, layers, optimizers, callbacks
-from tensorflow.keras.models import load_model
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report
+import joblib
 import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta

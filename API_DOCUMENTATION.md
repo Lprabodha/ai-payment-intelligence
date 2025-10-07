@@ -126,10 +126,13 @@ Predict fraud risk for a transaction.
 
 ### Chargeback Prediction
 
-#### POST /jobs/predict-chargebacks
+#### POST /predict/chargeback
 Predict chargeback risk for a transaction.
 
-**Request Body:**
+#### GET /predict/jobs/predict-chargebacks
+Run background job to predict chargebacks for recent transactions.
+
+**Request Body for POST /predict/chargeback:**
 ```json
 {
   "amount": 150.0,
@@ -152,7 +155,9 @@ Predict chargeback risk for a transaction.
 }
 ```
 
-**Response:**
+**No request body needed for GET /predict/jobs/predict-chargebacks**
+
+**Response for POST /predict/chargeback:**
 ```json
 {
   "chargeback_predicted": false,
@@ -161,6 +166,164 @@ Predict chargeback risk for a transaction.
   "model_type": "ensemble",
   "prediction_time": "2025-10-05T14:35:04.441905Z"
 }
+```
+
+**Response for GET /predict/jobs/predict-chargebacks:**
+```json
+{
+  "message": "Processed 1 transactions for chargeback prediction",
+  "total_transactions": 13,
+  "predictions_made": 1
+}
+```
+
+### AI-Powered Recommendations
+
+#### GET /predict/transactions/{transaction_id}/recommendations
+Get comprehensive AI-powered recommendations for a transaction based on fraud risk, chargeback risk, customer history, and behavioral patterns.
+
+**URL Parameters:**
+- `transaction_id` (string, required): The transaction ID to get recommendations for
+
+**Features:**
+- Real-time customer history analysis
+- Behavioral pattern detection
+- Risk-based recommendation levels
+- Actionable, specific recommendations
+- Rich contextual insights with emoji indicators
+- Categorized action plans (immediate, short-term, long-term, monitoring)
+
+**Response:**
+```json
+{
+  "transaction_id": "txn_abc123",
+  "created_at": "2025-10-07T14:35:04.441905",
+  "overall_priority": "high",
+  "risk_assessment": {
+    "fraud": {
+      "detected": true,
+      "confidence": 0.7234,
+      "level": "high",
+      "recommendations": [
+        "HIGH FRAUD RISK: Hold transaction for 4-hour manual review",
+        "VERIFICATION: Require 3DS authentication and SMS confirmation",
+        "DOCUMENTATION: Request billing address verification",
+        "MONITORING: Flag account for enhanced monitoring for 30 days",
+        "LIMITS: Reduce daily transaction limit to $1,000 for 7 days",
+        "VELOCITY ALERT: Customer made 5+ transactions in 1 hour - Implement 30-minute cooling period",
+        "HIGH VALUE: Transaction over $2,000 - Require 3DS authentication and email confirmation"
+      ]
+    },
+    "chargeback": {
+      "predicted": false,
+      "confidence": 0.3421,
+      "level": "medium",
+      "recommendations": [
+        "MEDIUM CHARGEBACK RISK: Customer has 30%+ dispute probability",
+        "CONFIRMATION: Send transaction confirmation email",
+        "DOCUMENTATION: Standard transaction documentation",
+        "FOLLOW-UP: Customer satisfaction check within 72 hours",
+        "MONITORING: Monitor for customer service complaints",
+        "WEEKEND RISK: Weekend transactions have 40% higher dispute rate - Send immediate confirmation"
+      ]
+    },
+    "routing": {
+      "recommendations": [
+        "Route to high-security gateway with advanced fraud detection",
+        "Use gateway with strongest 3DS and authentication capabilities",
+        "High-value routing: Use premium gateway with enhanced support"
+      ]
+    }
+  },
+  "action_plan": {
+    "immediate_actions": [
+      "HIGH FRAUD RISK: Hold transaction for 4-hour manual review",
+      "VELOCITY ALERT: Customer made 5+ transactions in 1 hour - Implement 30-minute cooling period"
+    ],
+    "short_term_actions": [
+      "VERIFICATION: Require 3DS authentication and SMS confirmation",
+      "DOCUMENTATION: Request billing address verification",
+      "CONFIRMATION: Send transaction confirmation email",
+      "FOLLOW-UP: Customer satisfaction check within 72 hours"
+    ],
+    "long_term_actions": [
+      "MONITORING: Flag account for enhanced monitoring for 30 days",
+      "MONITORING: Monitor for customer service complaints"
+    ],
+    "monitoring_actions": [
+      "MONITORING: Flag account for enhanced monitoring for 30 days",
+      "MONITORING: Monitor for customer service complaints"
+    ]
+  },
+  "insights": [
+    "Fraud indicators: High transaction velocity, Unusual amount pattern, Device risk detected",
+    "High fraud risk detected (confidence: 72.3%)",
+    "Velocity spike detected - 7 transactions in past hour",
+    "Device fingerprint reused 3 times - potential account takeover risk",
+    "New customer account (less than 7 days old) - higher risk profile"
+  ],
+  "amount_context": {
+    "amount": 2234.56,
+    "currency": "usd",
+    "tier": "high"
+  },
+  "ttl_days": 30
+}
+```
+
+**Recommendation Categories:**
+
+1. **Fraud-Specific Recommendations:**
+   - Velocity alerts (transaction frequency)
+   - Device risk detection
+   - IP reputation checks
+   - Amount testing pattern detection
+   - Time anomaly alerts
+   - Card BIN risk assessment
+   - High-value transaction protocols
+   - Customer chargeback history
+   - Account age-based verification
+
+2. **Chargeback-Specific Recommendations:**
+   - Weekend transaction risk management
+   - Subscription transaction protocols
+   - Digital goods protection
+   - Cross-border transaction verification
+   - Delivery confirmation requirements
+   - Customer satisfaction monitoring
+   - Dispute prevention strategies
+   - Industry-specific recommendations (travel, software, events)
+
+3. **Payment Routing Recommendations:**
+   - Gateway selection based on risk profile
+   - 3DS authentication requirements
+   - Dispute management tool recommendations
+   - High-value routing strategies
+
+**Insight Categories:**
+- Fraud indicators and detection
+- High risk alerts and warnings
+- Chargeback risk assessment
+- Cross-border transaction analysis
+- Velocity spike detection
+- Device pattern analysis
+- Time anomaly detection
+- Amount testing patterns
+- Customer history analysis
+- Refund pattern evaluation
+- New customer risk profiling
+- Low risk / legitimate transactions
+
+**Error Responses:**
+```json
+{
+  "detail": "Transaction not found"
+}
+```
+
+**Example Usage:**
+```bash
+curl -X GET "http://localhost:8010/api/predict/transactions/txn_abc123/recommendations"
 ```
 
 ### Smart Payment Routing

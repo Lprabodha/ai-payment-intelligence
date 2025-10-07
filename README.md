@@ -393,21 +393,8 @@ transactiq/
 │   ├── utils/              # Utility functions
 │   └── webhooks/           # Webhook handlers
 ├── docker/                 # Docker configuration
-├── tests/                  # Test suite
 ├── docs/                   # Documentation
 └── requirements.txt        # Python dependencies
-```
-
-### Running Tests
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=src
-
-# Run specific test file
-pytest tests/test_fraud_detection.py
 ```
 
 ### Code Quality
@@ -537,24 +524,20 @@ make logs-prod
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Add tests for new functionality
-5. Ensure all tests pass
-6. Submit a pull request
+4. Submit a pull request
 
 ### Code Standards
 - Follow PEP 8 style guidelines
 - Use type hints for all functions
 - Write comprehensive docstrings
-- Include unit tests for new features
 - Update documentation as needed
 
 ### Pull Request Process
-1. Ensure all tests pass
-2. Update documentation
-3. Add changelog entry
-4. Request code review
-5. Address feedback
-6. Merge after approval
+1. Update documentation
+2. Add changelog entry
+3. Request code review
+4. Address feedback
+5. Merge after approval
 
 ## 📄 License
 

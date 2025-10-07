@@ -1,9 +1,10 @@
 """
-Pydantic models for API requests and responses
+Pydantic models for API requests and responses with enhanced validation
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from decimal import Decimal
 
 class TransactionRequest(BaseModel):
     """Request model for transaction prediction"""

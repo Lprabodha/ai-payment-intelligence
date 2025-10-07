@@ -23,7 +23,7 @@ class RiskCacheService:
         """Connect to Redis"""
         try:
             # Use Redis URL from settings or default
-            redis_url = getattr(settings, 'REDIS_URL', 'redis://localhost:6380/0')
+            redis_url = getattr(settings, 'REDIS_URL')
             self.redis_client = redis.from_url(redis_url, decode_responses=True)
             
             # Test connection

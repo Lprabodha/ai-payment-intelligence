@@ -619,31 +619,41 @@ def _get_smart_routing_prediction(transaction_data):
         is_evening = 1 if hour >= 18 else 0
         is_night = 1 if hour < 6 else 0
         
-        # Build state vector
-        state = [
+        # Build feature vector
+        features = np.array([[
             amount_log, amount_sqrt, amount_category,
             country_risk, card_success_rate, risk_score / 100.0,
             hour_sin, hour_cos, is_weekend,
             is_business_hours, is_evening, is_night
-        ]
+        ]])
         
-        # Get prediction
-        predictions = routing_model.predict(np.array(state).reshape(1, -1), verbose=0)[0]
-        gateway_map = {0: "Stripe", 1: "PayPal", 2: "Adyen"}
-        
-        # Calculate confidence
-        softmax_scores = np.exp(predictions) / np.sum(np.exp(predictions))
-        recommended = gateway_map[np.argmax(predictions)]
-        confidence = float(softmax_scores[np.argmax(predictions)])
-        
-        return {
-            "recommended_gateway": recommended,
-            "confidence": confidence,
-            "all_scores": {
-                gateway_map[i]: float(softmax_scores[i]) 
-                for i in range(len(gateway_map))
+        # Get prediction using scikit-learn model
+        if hasattr(routing_model, 'predict_proba'):
+            # RandomForest or other classifier with probability
+            probabilities = routing_model.predict_proba(features)[0]
+            gateway_map = {0: "Stripe", 1: "PayPal", 2: "Adyen"}
+            recommended = gateway_map[np.argmax(probabilities)]
+            confidence = float(np.max(probabilities))
+            
+            return {
+                "recommended_gateway": recommended,
+                "confidence": confidence,
+                "all_scores": {
+                    gateway_map[i]: float(probabilities[i]) 
+                    for i in range(len(gateway_map))
+                }
             }
-        }
+        else:
+            # Simple prediction
+            prediction = routing_model.predict(features)[0]
+            gateway_map = {0: "Stripe", 1: "PayPal", 2: "Adyen"}
+            recommended = gateway_map.get(prediction, "Stripe")
+            
+            return {
+                "recommended_gateway": recommended,
+                "confidence": 0.8,
+                "model_type": "sklearn"
+            }
         
     except Exception as e:
         print(f"Error in smart routing prediction: {e}")
