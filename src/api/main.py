@@ -15,6 +15,7 @@ from routes.health import router as health_router
 from routes.predictions import router as predictions_router
 from routes.webhooks import router as webhooks_router
 from routes.risk import router as risk_router
+from routes.rdr import router as rdr_router
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application"""
@@ -48,6 +49,7 @@ def create_app() -> FastAPI:
     app.include_router(predictions_router)
     app.include_router(webhooks_router)
     app.include_router(risk_router)
+    app.include_router(rdr_router)  # RDR (Rapid Dispute Resolution)
     
     return app
 

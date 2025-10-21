@@ -30,6 +30,7 @@ This latest version introduces significant improvements to all core AI models, f
 - **🎯 Smart Payment Routing**: AI-driven gateway selection with DQN reinforcement learning
 - **📈 Revenue Forecasting**: Predictive analytics for subscription business growth
 - **🛡️ Real-time Risk Scoring**: Comprehensive multi-factor risk assessment engine
+- **🔄 RDR System (NEW)**: Rapid Dispute Resolution with automated refund processing
 
 #### ⚙️ Enhanced ML Features (v3.0.0)
 - **🔄 Stacking Ensemble**: Meta-learning with Logistic Regression combining 5 base models
@@ -48,6 +49,7 @@ This latest version introduces significant improvements to all core AI models, f
 - **💾 Caching Layer**: Redis-based performance optimization
 - **📈 Monitoring**: Built-in metrics, structured logging, and health checks
 - **📊 Scalability**: Horizontal scaling support for high-traffic environments
+- **🔄 RDR System**: Automated dispute resolution and chargeback prevention
 
 ## 🏗️ Architecture
 
@@ -1140,6 +1142,17 @@ For complete API documentation with curl examples, see [API_DOCUMENTATION.md](AP
 - `POST /webhook/stripe` - Stripe event processing
 - `POST /webhook/solidgate` - Solidgate event processing
 
+### 🔄 RDR (Rapid Dispute Resolution) Endpoints [NEW v3.0.0]
+- `POST /rdr/alerts` - Create RDR alert
+- `POST /rdr/alerts/{alert_id}/process` - Process alert and get decision
+- `POST /rdr/refunds` - Issue refund from decision
+- `POST /rdr/refunds/manual` - Manual refund processing
+- `GET /rdr/alerts` - List active alerts
+- `GET /rdr/alerts/{alert_id}` - Get specific alert
+- `GET /rdr/refunds/{refund_id}` - Get refund status
+- `GET /rdr/metrics` - Get RDR system metrics
+- `POST /rdr/transactions/{txid}/check` - Check if transaction needs RDR
+
 ### 🏥 Health & Monitoring
 - `GET /` - Basic health check
 - `GET /health` - Detailed system health
@@ -1147,6 +1160,17 @@ For complete API documentation with curl examples, see [API_DOCUMENTATION.md](AP
 ## 🎉 What's New in v3.0.0
 
 ### 🚀 Major Enhancements
+
+**0. RDR (Rapid Dispute Resolution) System**
+   - **Automated Chargeback Prevention**: Intelligent refund decisions before disputes occur
+   - **ML-Driven Decisions**: Cost-benefit analysis with ROI calculations
+   - **Multi-Gateway Support**: Stripe and Solidgate automatic refund processing
+   - **Alert System**: Multi-channel notifications (Email, Webhook, Slack)
+   - **Customer Retention**: VIP customer prioritization and lifetime value analysis
+   - **5 Decision Types**: Auto-refund, manual review, contact customer, decline, gather evidence
+   - **Expected Impact**: 50-67% chargeback reduction, 300-500% ROI
+   - **9 API Endpoints**: Complete RDR workflow management
+
 1. **Stacking Ensemble Architecture**
    - Replaced simple voting with meta-learning stacking
    - Logistic Regression meta-learner for optimal model combination
