@@ -53,6 +53,11 @@ http://localhost:8010
 #### GET /
 Get API health status and basic information.
 
+**cURL Example:**
+```bash
+curl -X GET http://localhost:8010/
+```
+
 **Response:**
 ```json
 {
@@ -65,6 +70,11 @@ Get API health status and basic information.
 
 #### GET /health
 Detailed health check with system status.
+
+**cURL Example:**
+```bash
+curl -X GET http://localhost:8010/health
+```
 
 **Response:**
 ```json
@@ -85,6 +95,31 @@ Detailed health check with system status.
 
 #### POST /predict/fraud
 Predict fraud risk for a transaction.
+
+**cURL Example:**
+```bash
+curl -X POST http://localhost:8010/predict/fraud \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": 150.0,
+    "currency": "usd",
+    "email": "user@example.com",
+    "ip_address": "192.168.1.1",
+    "card_country": "US",
+    "billing_country": "US",
+    "card_brand": "VISA",
+    "funding_type": "credit",
+    "fingerprint": "fp_123456789",
+    "risk_score": 25,
+    "three_d_secure": "authenticated",
+    "cvc_check": "pass",
+    "address_line1_check": "pass",
+    "postal_code_check": "pass",
+    "outcome_type": "authorized",
+    "seller_message": "Your transaction was successful.",
+    "network_status": "approved_by_network"
+  }'
+```
 
 **Request Body:**
 ```json
@@ -129,6 +164,24 @@ Predict fraud risk for a transaction.
 #### POST /jobs/predict-chargebacks
 Predict chargeback risk for a transaction.
 
+**cURL Example:**
+```bash
+curl -X POST http://localhost:8010/jobs/predict-chargebacks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": 150.0,
+    "currency": "usd",
+    "email": "user@example.com",
+    "ip_address": "192.168.1.1",
+    "card_country": "US",
+    "billing_country": "US",
+    "card_brand": "VISA",
+    "funding_type": "credit",
+    "fingerprint": "fp_123456789",
+    "risk_score": 25
+  }'
+```
+
 **Request Body:**
 ```json
 {
@@ -171,6 +224,11 @@ Get payment gateway recommendations for a transaction.
 **Path Parameters:**
 - `txid` (string): Transaction ID
 
+**cURL Example:**
+```bash
+curl -X GET http://localhost:8010/transactions/tx_123456789/recommendations
+```
+
 **Response:**
 ```json
 {
@@ -195,6 +253,22 @@ Get payment gateway recommendations for a transaction.
 
 #### POST /predict/subscription-revenue
 Predict subscription revenue and growth.
+
+**cURL Example:**
+```bash
+curl -X POST http://localhost:8010/predict/subscription-revenue \
+  -H "Content-Type: application/json" \
+  -d '{
+    "subscription_id": "sub_123456789",
+    "account_age_days": 365,
+    "renewal_count": 3,
+    "average_subscription_value": 50.0,
+    "subscription_duration_days": 30,
+    "customer_satisfaction": 8.5,
+    "payment_success_rate": 0.95,
+    "churn_risk_score": 0.2
+  }'
+```
 
 **Request Body:**
 ```json
@@ -226,6 +300,22 @@ Predict subscription revenue and growth.
 
 #### POST /risk/score
 Score a transaction for comprehensive risk assessment.
+
+**cURL Example:**
+```bash
+curl -X POST http://localhost:8010/risk/score \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transaction_id": "tx_123456789",
+    "amount": 150.0,
+    "currency": "usd",
+    "email": "user@example.com",
+    "ip_address": "192.168.1.1",
+    "card_country": "US",
+    "billing_country": "US",
+    "card_brand": "VISA"
+  }'
+```
 
 **Request Body:**
 ```json
@@ -299,6 +389,26 @@ Score a transaction for comprehensive risk assessment.
 #### POST /risk/score/batch
 Score multiple transactions for risk assessment.
 
+**cURL Example:**
+```bash
+curl -X POST http://localhost:8010/risk/score/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transactions": [
+      {
+        "transaction_id": "tx_001",
+        "amount": 100.0,
+        "email": "user1@example.com"
+      },
+      {
+        "transaction_id": "tx_002",
+        "amount": 200.0,
+        "email": "user2@example.com"
+      }
+    ]
+  }'
+```
+
 **Request Body:**
 ```json
 {
@@ -341,6 +451,11 @@ Score multiple transactions for risk assessment.
 #### GET /risk/assessment/{transaction_id}
 Get cached risk assessment for a transaction.
 
+**cURL Example:**
+```bash
+curl -X GET http://localhost:8010/risk/assessment/tx_123456789
+```
+
 **Response:**
 ```json
 {
@@ -357,6 +472,11 @@ Get cached risk assessment for a transaction.
 #### GET /risk/profile/{user_id}
 Get risk profile for a user.
 
+**cURL Example:**
+```bash
+curl -X GET http://localhost:8010/risk/profile/user_123456789
+```
+
 **Response:**
 ```json
 {
@@ -371,6 +491,18 @@ Get risk profile for a user.
 
 #### PUT /risk/thresholds
 Update risk scoring thresholds.
+
+**cURL Example:**
+```bash
+curl -X PUT http://localhost:8010/risk/thresholds \
+  -H "Content-Type: application/json" \
+  -d '{
+    "low_threshold": 0.3,
+    "medium_threshold": 0.6,
+    "high_threshold": 0.8,
+    "auto_decline_threshold": 0.95
+  }'
+```
 
 **Request Body:**
 ```json
@@ -405,6 +537,11 @@ Update risk scoring thresholds.
 #### GET /risk/metrics
 Get risk scoring metrics and statistics.
 
+**cURL Example:**
+```bash
+curl -X GET http://localhost:8010/risk/metrics
+```
+
 **Response:**
 ```json
 {
@@ -434,6 +571,25 @@ Get risk scoring metrics and statistics.
 
 #### POST /webhook/stripe
 Handle Stripe webhook events.
+
+**cURL Example:**
+```bash
+curl -X POST http://localhost:8010/webhook/stripe \
+  -H "Content-Type: application/json" \
+  -H "Stripe-Signature: t=1234567890,v1=signature_here" \
+  -d '{
+    "id": "evt_123456789",
+    "object": "event",
+    "type": "payment_intent.succeeded",
+    "data": {
+      "object": {
+        "id": "pi_123456789",
+        "amount": 1500,
+        "currency": "usd"
+      }
+    }
+  }'
+```
 
 **Headers:**
 - `Stripe-Signature`: Webhook signature for verification
@@ -467,6 +623,28 @@ Handle Stripe webhook events.
 
 #### POST /webhook/solidgate
 Handle Solidgate webhook events.
+
+**cURL Example:**
+```bash
+curl -X POST http://localhost:8010/webhook/solidgate \
+  -H "Content-Type: application/json" \
+  -H "Solidgate-Event-Type: card_gate.order.updated" \
+  -H "Solidgate-Event-Id: evt_123456789" \
+  -H "Signature: signature_here" \
+  -d '{
+    "order": {
+      "order_id": "order_123456789",
+      "amount": 15000,
+      "currency": "USD",
+      "status": "approved",
+      "customer_email": "user@example.com",
+      "card": {
+        "brand": "VISA",
+        "country": "US"
+      }
+    }
+  }'
+```
 
 **Headers:**
 - `Solidgate-Event-Type`: Event type (e.g., "card_gate.order.updated")

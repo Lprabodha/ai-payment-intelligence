@@ -14,22 +14,28 @@ from sklearn.metrics import (
     precision_score, recall_score, f1_score, roc_auc_score,
     average_precision_score, precision_recall_curve
 )
-from sklearn.preprocessing import StandardScaler, RobustScaler
-from sklearn.ensemble import IsolationForest, VotingClassifier
+from sklearn.preprocessing import StandardScaler, RobustScaler, PolynomialFeatures
+from sklearn.ensemble import IsolationForest, VotingClassifier, StackingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from imblearn.over_sampling import SMOTE, BorderlineSMOTE, RandomOverSampler
-from imblearn.under_sampling import EditedNearestNeighbours
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.feature_selection import SelectFromModel, RFECV
+from imblearn.over_sampling import SMOTE, BorderlineSMOTE, RandomOverSampler, ADASYN
+from imblearn.under_sampling import EditedNearestNeighbours, TomekLinks
+from imblearn.combine import SMOTETomek
 from imblearn.pipeline import Pipeline as ImbPipeline
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
+from catboost import CatBoostClassifier
 import joblib
 import matplotlib.pyplot as plt
 import seaborn as sns
+import shap
 
 from scipy import stats
 from scipy.spatial.distance import pdist, squareform
 import networkx as nx
+import optuna
+from optuna.samplers import TPESampler
 
 
 class FraudDetectionModel:
@@ -201,6 +207,87 @@ class FraudDetectionModel:
         
         return df
 
+    def create_interaction_features(self, df):
+        """Create interaction features for better pattern detection"""
+        df = df.copy()
+        
+        # Amount × Time interactions
+        df['amount_hour_interaction'] = df['amount'] * df['hour']
+        df['amount_weekend_interaction'] = df['amount'] * df['is_weekend']
+        
+        # Velocity × Amount interactions
+        df['velocity_amount_ratio'] = df['transactions_24h'] * df['amount_log']
+        df['amount_per_transaction_24h'] = df['amount'] / (df['transactions_24h'] + 1)
+        
+        # Risk × Behavioral interactions
+        df['risk_country_mismatch'] = df['country_mismatch'] * df['email_domain_risk']
+        df['risk_velocity_interaction'] = df['transactions_1h'] * df['email_domain_risk']
+        
+        # Network × Amount interactions
+        df['ip_connections_amount'] = df['ip_email_connections'] * df['amount_log']
+        df['fp_connections_amount'] = df['fp_email_connections'] * df['amount_log']
+        
+        # Anomaly combinations
+        df['combined_anomaly_score'] = (
+            df['amount_zscore'] + df['hour_anomaly'] + df['country_anomaly']
+        ) / 3
+        
+        # Cross-feature ratios
+        df['unique_countries_per_transaction'] = df['unique_countries_24h'] / (df['transactions_24h'] + 1)
+        df['unique_ips_per_transaction'] = df['unique_ips_24h'] / (df['transactions_24h'] + 1)
+        
+        return df
+
+    def create_graph_features(self, df):
+        """Create graph-based features using network analysis"""
+        df = df.copy()
+        
+        # Build email-IP bipartite graph
+        G = nx.Graph()
+        
+        for idx, row in df.iterrows():
+            email = row['email']
+            ip = row['ip_address']
+            fp = row['fingerprint']
+            
+            # Add edges
+            G.add_edge(f"email_{email}", f"ip_{ip}")
+            G.add_edge(f"email_{email}", f"fp_{fp}")
+            G.add_edge(f"ip_{ip}", f"fp_{fp}")
+        
+        # Calculate centrality measures
+        try:
+            degree_centrality = nx.degree_centrality(G)
+            betweenness = nx.betweenness_centrality(G, k=min(100, len(G.nodes())))
+            
+            df['email_degree_centrality'] = df['email'].apply(
+                lambda x: degree_centrality.get(f"email_{x}", 0)
+            )
+            df['ip_degree_centrality'] = df['ip_address'].apply(
+                lambda x: degree_centrality.get(f"ip_{x}", 0)
+            )
+            df['email_betweenness'] = df['email'].apply(
+                lambda x: betweenness.get(f"email_{x}", 0)
+            )
+            
+            # Community detection (simplified)
+            df['network_clustering_coef'] = 0.0
+            for idx, row in df.iterrows():
+                email_node = f"email_{row['email']}"
+                if email_node in G:
+                    neighbors = list(G.neighbors(email_node))
+                    if len(neighbors) > 1:
+                        subgraph = G.subgraph(neighbors)
+                        df.loc[idx, 'network_clustering_coef'] = nx.density(subgraph)
+        except:
+            # If graph analysis fails, set defaults
+            df['email_degree_centrality'] = 0.0
+            df['ip_degree_centrality'] = 0.0
+            df['email_betweenness'] = 0.0
+            df['network_clustering_coef'] = 0.0
+        
+        return df
+
     def _iqr_outlier_score(self, series):
         """Calculate IQR-based outlier score"""
         Q1 = series.quantile(0.25)
@@ -227,78 +314,186 @@ class FraudDetectionModel:
         df['fingerprint'] = df['fingerprint'].fillna('unknown')
         
         # Create all feature sets
+        print("  Creating temporal features...")
         df = self.create_temporal_features(df)
+        print("  Creating velocity features...")
         df = self.create_velocity_features(df)
+        print("  Creating behavioral features...")
         df = self.create_behavioral_features(df)
+        print("  Creating network features...")
         df = self.create_network_features(df)
+        print("  Creating anomaly features...")
         df = self.create_anomaly_features(df)
+        print("  Creating interaction features...")
+        df = self.create_interaction_features(df)
+        print("  Creating graph-based features...")
+        df = self.create_graph_features(df)
         
         # Create target variable
         df['is_fraud'] = (df['disputed'].fillna(0).astype(int) + 
                          df['refunded'].fillna(0).astype(int) > 0).astype(int)
         
-        print(f"Feature engineering complete. Created {len(df.columns)} features.")
+        print(f"[SUCCESS] Feature engineering complete. Created {len(df.columns)} features.")
         return df
 
-    def create_ensemble_models(self):
+    def optimize_hyperparameters(self, X_train, y_train, X_val, y_val, model_type='xgboost'):
+        """Optimize hyperparameters using Optuna"""
+        
+        def objective(trial):
+            if model_type == 'xgboost':
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 500, 2000),
+                    'max_depth': trial.suggest_int('max_depth', 4, 12),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+                    'subsample': trial.suggest_float('subsample', 0.7, 1.0),
+                    'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0),
+                    'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+                    'gamma': trial.suggest_float('gamma', 0, 1),
+                    'tree_method': 'hist',
+                    'random_state': 42,
+                    'n_jobs': -1
+                }
+                model = XGBClassifier(**params)
+            
+            elif model_type == 'lightgbm':
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 500, 2000),
+                    'max_depth': trial.suggest_int('max_depth', 4, 12),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+                    'subsample': trial.suggest_float('subsample', 0.7, 1.0),
+                    'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0),
+                    'num_leaves': trial.suggest_int('num_leaves', 20, 100),
+                    'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
+                    'random_state': 42,
+                    'n_jobs': -1,
+                    'verbose': -1
+                }
+                model = LGBMClassifier(**params)
+            
+            elif model_type == 'catboost':
+                params = {
+                    'iterations': trial.suggest_int('iterations', 500, 2000),
+                    'depth': trial.suggest_int('depth', 4, 10),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+                    'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
+                    'border_count': trial.suggest_int('border_count', 32, 255),
+                    'random_seed': 42,
+                    'verbose': False
+                }
+                model = CatBoostClassifier(**params)
+            
+            # Train with SMOTE
+            smote = SMOTE(random_state=42)
+            X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
+            
+            # Scale features
+            scaler = RobustScaler()
+            X_train_scaled = scaler.fit_transform(X_train_balanced)
+            X_val_scaled = scaler.transform(X_val)
+            
+            # Train and evaluate
+            model.fit(X_train_scaled, y_train_balanced)
+            y_pred_proba = model.predict_proba(X_val_scaled)[:, 1]
+            score = roc_auc_score(y_val, y_pred_proba)
+            
+            return score
+        
+        # Run optimization
+        study = optuna.create_study(direction='maximize', sampler=TPESampler(seed=42))
+        study.optimize(objective, n_trials=20, show_progress_bar=True)
+        
+        print(f"  Best {model_type} params: {study.best_params}")
+        print(f"  Best validation AUC: {study.best_value:.4f}")
+        
+        return study.best_params
+
+    def create_ensemble_models(self, use_optimized=False, optimized_params=None):
         """Initialize multiple ML models for ensemble prediction"""
         
-        # Base models with different characteristics
+        if optimized_params is None:
+            optimized_params = {}
+        
+        # Base models with tuned or default parameters
         models = {
             'xgboost': XGBClassifier(
-                n_estimators=1000,
-                max_depth=8,
-                learning_rate=0.05,
-                subsample=0.9,
-                colsample_bytree=0.9,
-                tree_method="hist",
-                random_state=42,
-                n_jobs=-1
+                **optimized_params.get('xgboost', {
+                    'n_estimators': 1200,
+                    'max_depth': 8,
+                    'learning_rate': 0.04,
+                    'subsample': 0.85,
+                    'colsample_bytree': 0.85,
+                    'min_child_weight': 3,
+                    'gamma': 0.1,
+                    'tree_method': 'hist',
+                    'random_state': 42,
+                    'n_jobs': -1
+                })
             ),
             'lightgbm': LGBMClassifier(
-                n_estimators=1000,
-                max_depth=8,
-                learning_rate=0.05,
-                subsample=0.9,
-                colsample_bytree=0.9,
-                random_state=42,
-                n_jobs=-1,
-                verbose=-1
+                **optimized_params.get('lightgbm', {
+                    'n_estimators': 1200,
+                    'max_depth': 8,
+                    'learning_rate': 0.04,
+                    'subsample': 0.85,
+                    'colsample_bytree': 0.85,
+                    'num_leaves': 50,
+                    'min_child_samples': 20,
+                    'random_state': 42,
+                    'n_jobs': -1,
+                    'verbose': -1
+                })
+            ),
+            'catboost': CatBoostClassifier(
+                **optimized_params.get('catboost', {
+                    'iterations': 1200,
+                    'depth': 8,
+                    'learning_rate': 0.04,
+                    'l2_leaf_reg': 3,
+                    'border_count': 128,
+                    'random_seed': 42,
+                    'verbose': False
+                })
             ),
             'random_forest': RandomForestClassifier(
-                n_estimators=500,
-                max_depth=12,
-                min_samples_split=10,
-                min_samples_leaf=5,
+                n_estimators=600,
+                max_depth=14,
+                min_samples_split=8,
+                min_samples_leaf=4,
+                max_features='sqrt',
                 random_state=42,
                 n_jobs=-1
             ),
-            'logistic_regression': LogisticRegression(
-                C=0.1,
-                max_iter=1000,
-                random_state=42,
-                n_jobs=-1
+            'gradient_boosting': GradientBoostingClassifier(
+                n_estimators=600,
+                max_depth=6,
+                learning_rate=0.05,
+                subsample=0.85,
+                random_state=42
             )
         }
         
         return models
 
-    def train_ensemble(self, X_train, y_train, X_val, y_val):
-        """Train multiple models and combine their predictions"""
+    def train_ensemble(self, X_train, y_train, X_val, y_val, use_stacking=True):
+        """Train multiple models and combine their predictions using stacking ensemble"""
         
         models = self.create_ensemble_models()
         trained_models = {}
         
         # Different sampling strategies for different models
         sampling_strategies = {
-            'xgboost': SMOTE(random_state=42),
-            'lightgbm': BorderlineSMOTE(random_state=42),
-            'random_forest': EditedNearestNeighbours(),
-            'logistic_regression': SMOTE(random_state=42)
+            'xgboost': SMOTETomek(random_state=42),
+            'lightgbm': ADASYN(random_state=42),
+            'catboost': SMOTE(random_state=42),
+            'random_forest': BorderlineSMOTE(random_state=42),
+            'gradient_boosting': SMOTE(random_state=42)
         }
         
+        # Train base models
+        base_estimators = []
+        
         for name, model in models.items():
-            print(f"🔄 Training {name}...")
+            print(f"Training {name}...")
             
             # Create pipeline with sampling and scaling
             pipeline = ImbPipeline([
@@ -315,26 +510,59 @@ class FraudDetectionModel:
             val_auc = roc_auc_score(y_val, y_val_pred)
             val_pr_auc = average_precision_score(y_val, y_val_pred)
             
-            print(f"✅ {name} - Val AUC: {val_auc:.4f}, Val PR-AUC: {val_pr_auc:.4f}")
+            print(f"[COMPLETE] {name} - Val AUC: {val_auc:.4f}, Val PR-AUC: {val_pr_auc:.4f}")
             
             trained_models[name] = pipeline
+            base_estimators.append((name, pipeline))
         
-        # Create voting classifier
-        voting_models = [(name, model) for name, model in trained_models.items()]
-        ensemble = VotingClassifier(
-            estimators=voting_models,
-            voting='soft'
-        )
-        
-        # Train ensemble on full training data
-        ensemble.fit(X_train, y_train)
-        
-        # Final validation
-        y_val_ensemble = ensemble.predict_proba(X_val)[:, 1]
-        ensemble_auc = roc_auc_score(y_val, y_val_ensemble)
-        ensemble_pr_auc = average_precision_score(y_val, y_val_ensemble)
-        
-        print(f"🎯 Ensemble - Val AUC: {ensemble_auc:.4f}, Val PR-AUC: {ensemble_pr_auc:.4f}")
+        if use_stacking:
+            # Create stacking classifier with logistic regression meta-learner
+            print("\nTraining stacking ensemble...")
+            
+            # Meta-learner: Logistic Regression with L2 regularization
+            meta_learner = LogisticRegression(
+                C=0.5,
+                max_iter=2000,
+                random_state=42,
+                n_jobs=-1,
+                solver='saga'
+            )
+            
+            # Create stacking ensemble
+            ensemble = StackingClassifier(
+                estimators=base_estimators,
+                final_estimator=meta_learner,
+                cv=5,
+                stack_method='predict_proba',
+                n_jobs=-1,
+                verbose=0
+            )
+            
+            # Train stacking ensemble
+            ensemble.fit(X_train, y_train)
+            
+            # Final validation
+            y_val_ensemble = ensemble.predict_proba(X_val)[:, 1]
+            ensemble_auc = roc_auc_score(y_val, y_val_ensemble)
+            ensemble_pr_auc = average_precision_score(y_val, y_val_ensemble)
+            
+            print(f"[ENSEMBLE] Stacking Ensemble - Val AUC: {ensemble_auc:.4f}, Val PR-AUC: {ensemble_pr_auc:.4f}")
+        else:
+            # Fallback to voting classifier
+            print("\nTraining voting ensemble...")
+            ensemble = VotingClassifier(
+                estimators=base_estimators,
+                voting='soft',
+                n_jobs=-1
+            )
+            
+            ensemble.fit(X_train, y_train)
+            
+            y_val_ensemble = ensemble.predict_proba(X_val)[:, 1]
+            ensemble_auc = roc_auc_score(y_val, y_val_ensemble)
+            ensemble_pr_auc = average_precision_score(y_val, y_val_ensemble)
+            
+            print(f"[ENSEMBLE] Voting Ensemble - Val AUC: {ensemble_auc:.4f}, Val PR-AUC: {ensemble_pr_auc:.4f}")
         
         return ensemble, trained_models
 
@@ -424,15 +652,27 @@ class FraudDetectionModel:
         return ensemble, metrics
 
     def _analyze_feature_importance(self, ensemble, features, X_train):
-        """Analyze and visualize feature importance"""
+        """Analyze and visualize feature importance using multiple methods"""
+        
+        print("\n[INFO] Analyzing feature importance...")
         
         # Get feature importance from ensemble models
         importances = {}
-        for name, model in ensemble.named_estimators_.items():
-            if hasattr(model.named_steps['model'], 'feature_importances_'):
-                importances[name] = model.named_steps['model'].feature_importances_
-            elif hasattr(model.named_steps['model'], 'coef_'):
-                importances[name] = np.abs(model.named_steps['model'].coef_[0])
+        
+        # For stacking ensemble
+        if hasattr(ensemble, 'estimators_'):
+            for name, model in zip([e[0] for e in ensemble.estimators], ensemble.estimators_):
+                if hasattr(model.named_steps['model'], 'feature_importances_'):
+                    importances[name] = model.named_steps['model'].feature_importances_
+                elif hasattr(model.named_steps['model'], 'coef_'):
+                    importances[name] = np.abs(model.named_steps['model'].coef_[0])
+        # For voting ensemble
+        elif hasattr(ensemble, 'named_estimators_'):
+            for name, model in ensemble.named_estimators_.items():
+                if hasattr(model.named_steps['model'], 'feature_importances_'):
+                    importances[name] = model.named_steps['model'].feature_importances_
+                elif hasattr(model.named_steps['model'], 'coef_'):
+                    importances[name] = np.abs(model.named_steps['model'].coef_[0])
         
         # Average importance across models
         if importances:
@@ -442,44 +682,133 @@ class FraudDetectionModel:
                 'importance': avg_importance
             }).sort_values('importance', ascending=False)
             
-            # Plot top features
-            plt.figure(figsize=(12, 8))
-            top_features = feature_importance.head(20)
-            sns.barplot(data=top_features, y='feature', x='importance')
-            plt.title('Top 20 Feature Importances (Ensemble Average)')
-            plt.tight_layout()
+            # Plot traditional feature importance
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 8))
             
+            # Top 20 features
+            top_features = feature_importance.head(20)
+            sns.barplot(data=top_features, y='feature', x='importance', ax=ax1)
+            ax1.set_title('Top 20 Feature Importances (Ensemble Average)')
+            ax1.set_xlabel('Importance Score')
+            
+            # Individual model comparisons
+            if len(importances) > 1:
+                top_10_features = feature_importance.head(10)['feature'].tolist()
+                importance_df = pd.DataFrame(importances, index=features)
+                importance_df.loc[top_10_features].T.plot(kind='bar', ax=ax2)
+                ax2.set_title('Top 10 Features by Model')
+                ax2.set_xlabel('Model')
+                ax2.set_ylabel('Importance')
+                ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            
+            plt.tight_layout()
             os.makedirs("/src/data/models", exist_ok=True)
             plt.savefig("/src/data/models/fraud_detection_feature_importance.png", dpi=300, bbox_inches='tight')
-            plt.show()
+            plt.close()
+        
+        # SHAP explainability analysis
+        try:
+            print("  Calculating SHAP values...")
+            
+            # Sample data for SHAP (use subset for performance)
+            sample_size = min(500, len(X_train))
+            X_sample = X_train.sample(n=sample_size, random_state=42) if len(X_train) > sample_size else X_train
+            
+            # Get one of the tree-based models for SHAP
+            tree_model = None
+            for name in ['xgboost', 'lightgbm', 'catboost']:
+                if hasattr(ensemble, 'estimators_'):
+                    for est_name, est in zip([e[0] for e in ensemble.estimators], ensemble.estimators_):
+                        if name in est_name:
+                            tree_model = est.named_steps['model']
+                            break
+                elif hasattr(ensemble, 'named_estimators_') and name in ensemble.named_estimators_:
+                    tree_model = ensemble.named_estimators_[name].named_steps['model']
+                    break
+                if tree_model:
+                    break
+            
+            if tree_model is not None:
+                # Create SHAP explainer
+                explainer = shap.TreeExplainer(tree_model)
+                
+                # Calculate SHAP values
+                shap_values = explainer.shap_values(X_sample)
+                
+                # Handle binary classification output
+                if isinstance(shap_values, list):
+                    shap_values = shap_values[1]  # Use positive class
+                
+                # Plot SHAP summary
+                plt.figure(figsize=(12, 8))
+                shap.summary_plot(shap_values, X_sample, feature_names=features, show=False, max_display=20)
+                plt.title('SHAP Feature Importance Summary')
+                plt.tight_layout()
+                plt.savefig("/src/data/models/fraud_detection_shap_summary.png", dpi=300, bbox_inches='tight')
+                plt.close()
+                
+                # Plot SHAP bar plot
+                plt.figure(figsize=(12, 8))
+                shap.summary_plot(shap_values, X_sample, feature_names=features, plot_type='bar', show=False, max_display=20)
+                plt.title('SHAP Feature Importance (Mean Absolute SHAP Values)')
+                plt.tight_layout()
+                plt.savefig("/src/data/models/fraud_detection_shap_bar.png", dpi=300, bbox_inches='tight')
+                plt.close()
+                
+                print("  [SUCCESS] SHAP analysis complete!")
+                
+        except Exception as e:
+            print(f"  [WARNING] SHAP analysis failed: {e}")
+            print("  Continuing without SHAP visualizations...")
 
     def _save_models(self, ensemble, individual_models, features, metrics):
         """Save trained models and metadata"""
         
         os.makedirs("/src/data/models", exist_ok=True)
         
+        # Determine ensemble type
+        ensemble_type = "stacking_classifier" if isinstance(ensemble, StackingClassifier) else "voting_classifier_soft"
+        
         # Save ensemble model
         joblib.dump(ensemble, "/src/data/models/fraud_detection_pipeline.pkl")
+        print("  Saved ensemble model")
         
         # Save individual models
         for name, model in individual_models.items():
             joblib.dump(model, f"/src/data/models/fraud_detection_{name}.pkl")
+        print(f"  Saved {len(individual_models)} individual models")
         
         # Save metadata
         metadata = {
-            "model_version": "2.0.0",
-            "model_type": "ensemble_fraud_detection",
+            "model_version": "3.0.0",
+            "model_type": "enhanced_fraud_detection_ensemble",
             "created_at": datetime.now().isoformat(),
             "features_used": features,
+            "feature_count": len(features),
             "metrics": metrics,
             "models_in_ensemble": list(individual_models.keys()),
-            "ensemble_method": "voting_classifier_soft"
+            "ensemble_method": ensemble_type,
+            "enhancements": [
+                "CatBoost integration",
+                "Stacking ensemble with meta-learner",
+                "Advanced feature engineering (interaction, graph-based)",
+                "Multiple sampling strategies (SMOTETomek, ADASYN, BorderlineSMOTE)",
+                "SHAP explainability",
+                "Improved velocity and network features"
+            ],
+            "training_info": {
+                "use_stacking": isinstance(ensemble, StackingClassifier),
+                "use_graph_features": True,
+                "use_interaction_features": True,
+                "use_shap": True
+            }
         }
         
         with open("/src/data/models/fraud_detection_metadata.json", "w") as f:
             json.dump(metadata, f, indent=4)
         
-        print("✅ Fraud detection models saved successfully!")
+        print("  Saved model metadata")
+        print("\n[SUCCESS] Enhanced fraud detection models saved successfully!")
 
 
 def train():
