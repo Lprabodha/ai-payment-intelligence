@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from pymongo import MongoClient
 
-from config.settings import settings, model_config, feature_config
+from config.settings import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -22,7 +22,7 @@ class FraudDetectionService:
     
     def __init__(self, db: MongoClient):
         self.db = db
-        self.model_path = settings.model_path
+        self.model_path = settings.MODEL_PATH
         self.fraud_model = None
         self.fraud_features = []
         self.model_type = None
@@ -33,37 +33,13 @@ class FraudDetectionService:
     def _load_model(self):
         """Load fraud detection model and configuration"""
         try:
-            # Try to load enhanced model first
-            if settings.use_enhanced_models:
-                enhanced_model_path = os.path.join(
-                    self.model_path, 
-                    model_config.FRAUD_MODELS['enhanced']['ensemble']
-                )
-                
-                if os.path.exists(enhanced_model_path):
-                    self.fraud_model = joblib.load(enhanced_model_path)
-                    self.model_type = 'enhanced_ensemble'
-                    logger.info("Loaded enhanced fraud detection ensemble")
-                    
-                    # Load feature list from metadata
-                    metadata_path = os.path.join(self.model_path, "enhanced_fraud_metadata.json")
-                    if os.path.exists(metadata_path):
-                        import json
-                        with open(metadata_path) as f:
-                            metadata = json.load(f)
-                            self.fraud_features = metadata.get('features_used', [])
-                    return
+            # Load fraud detection pipeline
+            pipeline_path = os.path.join(self.model_path, "fraud_detection_pipeline.pkl")
             
-            # Fall back to legacy model
-            legacy_pipeline_path = os.path.join(
-                self.model_path, 
-                model_config.FRAUD_MODELS['legacy']['pipeline']
-            )
-            
-            if os.path.exists(legacy_pipeline_path):
-                self.fraud_model = joblib.load(legacy_pipeline_path)
+            if os.path.exists(pipeline_path):
+                self.fraud_model = joblib.load(pipeline_path)
                 self.model_type = 'legacy_pipeline'
-                logger.info("Loaded legacy fraud detection pipeline")
+                logger.info("Loaded fraud detection pipeline")
                 
                 # Load feature list from metadata
                 metadata_path = os.path.join(self.model_path, "fraud_detection_metadata.json")
@@ -218,12 +194,12 @@ class FraudDetectionService:
         risk_score = transaction_data.get('risk_score', 0)
         override_applied = False
         
-        if risk_score >= settings.radar_high_override:
+        if risk_score >= settings.RADAR_HIGH_OVERRIDE:
             pred = 1
             proba = max(proba, 0.90)
             reasons.append("Stripe risk score ≥ 65 (auto-flagged high risk)")
             override_applied = True
-        elif risk_score >= settings.radar_medium_hint:
+        elif risk_score >= settings.RADAR_MEDIUM_HINT:
             proba = max(proba, 0.50)
             reasons.append("Stripe risk score ≥ 55 (confidence boosted)")
         
@@ -259,12 +235,12 @@ class FraudDetectionService:
         risk_score = transaction_data.get('risk_score', 0)
         override_applied = False
         
-        if risk_score >= settings.radar_high_override:
+        if risk_score >= settings.RADAR_HIGH_OVERRIDE:
             pred = 1
             proba = max(proba, 0.90)
             reasons.append("Stripe risk score ≥ 65 (auto-flagged high risk)")
             override_applied = True
-        elif risk_score >= settings.radar_medium_hint:
+        elif risk_score >= settings.RADAR_MEDIUM_HINT:
             proba = max(proba, 0.50)
             reasons.append("Stripe risk score ≥ 55 (confidence boosted)")
         
@@ -331,9 +307,12 @@ class FraudDetectionService:
         
         domain = email.split('@')[-1].lower()
         
-        if domain in feature_config.COMMON_EMAIL_DOMAINS:
+        # Disposable email hints
+        disposable_hints = ['tempmail', 'throwaway', 'guerrillamail', 'mailinator', '10minutemail']
+        
+        if domain in settings.COMMON_DOMAINS:
             return 0
-        elif any(hint in domain for hint in feature_config.DISPOSABLE_EMAIL_HINTS):
+        elif any(hint in domain for hint in disposable_hints):
             return 2
         else:
             return 1

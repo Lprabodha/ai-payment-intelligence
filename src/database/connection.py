@@ -44,3 +44,13 @@ class DatabaseManager:
 # Global database instance
 db_manager = DatabaseManager()
 db = db_manager.db
+
+
+def get_db_connection():
+    """Return the active database connection (for DI / imports).
+
+    This helper provides the expected function name used across the
+    codebase (`get_db_connection`) and returns the underlying
+    `pymongo` database object.
+    """
+    return db

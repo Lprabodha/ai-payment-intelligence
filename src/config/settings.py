@@ -32,6 +32,10 @@ class Settings:
     API_TITLE = "AI Payment Intelligence API"
     API_VERSION = "1.0.0"
     API_DESCRIPTION = "Advanced AI-powered payment processing and fraud detection API"
+
+    # Logging Configuration (defaults, can be overridden with env vars)
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    log_format = os.getenv("LOG_FORMAT", "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     
     # Risk Score Thresholds
     RADAR_HIGH_OVERRIDE = 65   # >= 65 → force high-risk
