@@ -37,6 +37,12 @@ import networkx as nx
 import optuna
 from optuna.samplers import TPESampler
 
+# Import evaluation utility
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+from utils.model_evaluation import ModelEvaluator
+
 
 class FraudDetectionModel:
     """Detects fraudulent payment transactions"""
@@ -618,30 +624,40 @@ class FraudDetectionModel:
         # Train ensemble
         ensemble, individual_models = self.train_ensemble(X_train, y_train, X_val, y_val)
         
-        # Final evaluation
+        # Final evaluation using comprehensive evaluation utility
         print("\n🎯 Final Model Evaluation:")
-        y_test_pred = ensemble.predict_proba(X_test)[:, 1]
+        y_test_pred_proba = ensemble.predict_proba(X_test)[:, 1]
         
-        # Find optimal threshold
-        precision, recall, thresholds = precision_recall_curve(y_test, y_test_pred)
-        f1_scores = 2 * (precision * recall) / (precision + recall + 1e-9)
-        optimal_threshold = thresholds[np.argmax(f1_scores)]
+        # Use ModelEvaluator for comprehensive evaluation
+        evaluator = ModelEvaluator("fraud_detection", "/src/data/models")
+        metrics = evaluator.evaluate_classification(
+            y_test, 
+            None,  # Will use threshold-based prediction
+            y_test_pred_proba,
+            threshold=0.5,
+            save_images=True
+        )
         
-        y_test_pred_binary = (y_test_pred >= optimal_threshold).astype(int)
-        
-        metrics = {
-            'accuracy': accuracy_score(y_test, y_test_pred_binary),
-            'precision': precision_score(y_test, y_test_pred_binary, zero_division=0),
-            'recall': recall_score(y_test, y_test_pred_binary, zero_division=0),
-            'f1': f1_score(y_test, y_test_pred_binary, zero_division=0),
-            'roc_auc': roc_auc_score(y_test, y_test_pred),
-            'pr_auc': average_precision_score(y_test, y_test_pred),
-            'optimal_threshold': optimal_threshold
-        }
+        # Use optimal threshold if available
+        if 'optimal_threshold' in metrics:
+            optimal_threshold = metrics['optimal_threshold']
+            y_test_pred_binary = (y_test_pred_proba >= optimal_threshold).astype(int)
+            # Re-evaluate with optimal threshold
+            metrics = evaluator.evaluate_classification(
+                y_test,
+                y_test_pred_binary,
+                y_test_pred_proba,
+                threshold=optimal_threshold,
+                save_images=True
+            )
         
         print("\n📊 Test Set Performance:")
         for metric, value in metrics.items():
-            print(f"{metric:>15}: {value:.4f}")
+            if metric not in ['confusion_matrix', 'classification_report']:
+                print(f"{metric:>20}: {value:.4f}" if isinstance(value, (int, float)) else f"{metric:>20}: {value}")
+        
+        # Save metrics to JSON
+        evaluator.save_metrics("fraud_detection_metrics.json")
         
         # Feature importance analysis
         self._analyze_feature_importance(ensemble, X_train.columns, X_train)

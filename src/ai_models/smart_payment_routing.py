@@ -14,6 +14,12 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
+# Import evaluation utility
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+from utils.model_evaluation import ModelEvaluator
+
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
 mongo_client = MongoClient(MONGO_URI)
@@ -310,6 +316,112 @@ def train_enhanced_agent(episodes=50):
     os.makedirs("/src/data/models", exist_ok=True)
     agent.model.save("/src/data/models/smart_payment_routing_model.h5")
     
+    # Evaluate model performance
+    print("\n🎯 Evaluating Smart Payment Routing Model...")
+    
+    # Calculate evaluation metrics
+    avg_reward = np.mean(reward_history[-10:]) if len(reward_history) >= 10 else np.mean(reward_history)
+    std_reward = np.std(reward_history[-10:]) if len(reward_history) >= 10 else np.std(reward_history)
+    final_avg_loss = np.mean(loss_history[-10:]) if len(loss_history) >= 10 else np.mean(loss_history) if loss_history else 0
+    
+    # Test model on validation set
+    test_data = get_enhanced_transaction_data(limit=1000)
+    test_rewards = []
+    test_actions = []
+    
+    for state, reward in test_data:
+        state_array = np.array(state).reshape(1, -1)
+        action = agent.act(state_array, training=False)
+        test_actions.append(action)
+        test_rewards.append(reward)
+    
+    # Calculate routing accuracy metrics
+    metrics = {
+        'training_episodes': episodes,
+        'final_epsilon': float(agent.epsilon),
+        'best_total_reward': float(best_total),
+        'avg_reward_last_10_episodes': float(avg_reward),
+        'std_reward_last_10_episodes': float(std_reward),
+        'final_avg_loss': float(final_avg_loss),
+        'test_avg_reward': float(np.mean(test_rewards)),
+        'test_std_reward': float(np.std(test_rewards)),
+        'action_distribution': {
+            'stripe': int(np.sum(np.array(test_actions) == 0)),
+            'paypal': int(np.sum(np.array(test_actions) == 1)),
+            'adyen': int(np.sum(np.array(test_actions) == 2))
+        },
+        'reward_history': [float(r) for r in reward_history],
+        'loss_history': [float(l) for l in loss_history]
+    }
+    
+    # Create visualizations using ModelEvaluator
+    evaluator = ModelEvaluator("smart_payment_routing", "/src/data/models")
+    
+    # Plot training history
+    training_history = {
+        'reward': reward_history,
+        'loss': loss_history
+    }
+    evaluator.plot_training_history(training_history, save_image=True)
+    
+    # Create custom routing evaluation visualization
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    
+    # 1. Reward history
+    axes[0, 0].plot(reward_history, color='blue', alpha=0.7)
+    axes[0, 0].axhline(y=avg_reward, color='red', linestyle='--', label=f'Avg: {avg_reward:.2f}')
+    axes[0, 0].set_xlabel('Episode')
+    axes[0, 0].set_ylabel('Total Reward')
+    axes[0, 0].set_title('Training Reward History', fontsize=12, fontweight='bold')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # 2. Loss history
+    if loss_history:
+        axes[0, 1].plot(loss_history, color='red', alpha=0.7)
+        axes[0, 1].set_xlabel('Training Step')
+        axes[0, 1].set_ylabel('Loss')
+        axes[0, 1].set_title('Training Loss History', fontsize=12, fontweight='bold')
+        axes[0, 1].grid(True, alpha=0.3)
+    
+    # 3. Action distribution
+    action_dist = metrics['action_distribution']
+    actions = list(action_dist.keys())
+    counts = list(action_dist.values())
+    axes[1, 0].bar(actions, counts, color=['#3498db', '#2ecc71', '#e74c3c'])
+    axes[1, 0].set_ylabel('Count')
+    axes[1, 0].set_title('Gateway Selection Distribution (Test Set)', fontsize=12, fontweight='bold')
+    axes[1, 0].grid(True, alpha=0.3, axis='y')
+    
+    # 4. Metrics summary
+    axes[1, 1].axis('off')
+    table_data = [
+        ['Best Reward', f"{metrics['best_total_reward']:.2f}"],
+        ['Avg Reward (Last 10)', f"{metrics['avg_reward_last_10_episodes']:.2f}"],
+        ['Test Avg Reward', f"{metrics['test_avg_reward']:.2f}"],
+        ['Final Epsilon', f"{metrics['final_epsilon']:.4f}"],
+        ['Final Avg Loss', f"{metrics['final_avg_loss']:.4f}"]
+    ]
+    table = axes[1, 1].table(cellText=table_data, colLabels=['Metric', 'Value'],
+                            cellLoc='center', loc='center', bbox=[0, 0, 1, 1])
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    table.scale(1, 2)
+    axes[1, 1].set_title('Model Performance Summary', fontsize=12, fontweight='bold', pad=20)
+    
+    plt.suptitle('Smart Payment Routing - Model Evaluation Report', 
+                fontsize=16, fontweight='bold', y=0.995)
+    plt.tight_layout()
+    
+    image_path = "/src/data/models/smart_payment_routing_evaluation.png"
+    plt.savefig(image_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  ✅ Saved evaluation image: {image_path}")
+    
+    # Save metrics
+    evaluator.metrics = metrics
+    evaluator.save_metrics("smart_payment_routing_metrics.json")
+    
     metadata = {
         "created_at": datetime.utcnow().isoformat(),
         "model_version": "2.0.0",
@@ -324,17 +436,19 @@ def train_enhanced_agent(episodes=50):
         ],
         "final_epsilon": agent.epsilon,
         "best_total_reward": best_total,
-        "reward_history": reward_history,
-        "loss_history": loss_history,
-        "training_samples": len(data)
+        "metrics": metrics
     }
     
     with open("/src/data/models/smart_payment_metadata.json", "w") as f:
         json.dump(metadata, f, indent=4)
     
+    print("\n📊 Model Performance Summary:")
+    print(f"  Best Total Reward: {best_total:.2f}")
+    print(f"  Average Reward (Last 10 Episodes): {avg_reward:.2f} ± {std_reward:.2f}")
+    print(f"  Test Average Reward: {metrics['test_avg_reward']:.2f} ± {metrics['test_std_reward']:.2f}")
+    print(f"  Final Epsilon: {agent.epsilon:.4f}")
+    print(f"  Final Average Loss: {final_avg_loss:.4f}")
     print("Enhanced model and metadata saved successfully.")
-    print(f"Best total reward: {best_total:.2f}")
-    print(f"Final epsilon: {agent.epsilon:.4f}")
     
     return agent
 

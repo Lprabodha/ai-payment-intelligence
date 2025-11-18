@@ -21,6 +21,12 @@ import json
 import warnings
 warnings.filterwarnings('ignore')
 
+# Import evaluation utility
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+from utils.model_evaluation import ModelEvaluator
+
 # Load environment variables
 load_dotenv()
 
@@ -231,18 +237,27 @@ y_pred = model.predict(X_test_scaled)
             self.models['ensemble'] = VotingRegressor(ensemble_models)
             self.models['ensemble'].fit(X_train_scaled, y_train)
             
-            # Evaluate ensemble
+            # Evaluate ensemble using comprehensive evaluation utility
+            print("\n🎯 Final Model Evaluation:")
             y_pred_ensemble = self.models['ensemble'].predict(X_test_scaled)
-            ensemble_mae = mean_absolute_error(y_test, y_pred_ensemble)
-            ensemble_r2 = r2_score(y_test, y_pred_ensemble)
             
-            print(f"Ensemble MAE: {ensemble_mae:.2f}, R²: {ensemble_r2:.3f}")
+            # Use ModelEvaluator for comprehensive evaluation
+            evaluator = ModelEvaluator("subscription_revenue_forecasting", "/src/data/models")
+            metrics = evaluator.evaluate_regression(y_test, y_pred_ensemble, save_images=True)
+            
+            print("\n📊 Test Set Performance:")
+            for metric, value in metrics.items():
+                print(f"{metric:>20}: {value:.4f}" if isinstance(value, (int, float)) else f"{metric:>20}: {value}")
+            
+            # Save metrics to JSON
+            evaluator.save_metrics("subscription_revenue_forecasting_metrics.json")
             
             self.results = {
                 'model_scores': model_scores,
-                'ensemble_mae': ensemble_mae,
-                'ensemble_r2': ensemble_r2,
-                'test_samples': len(X_test)
+                'ensemble_mae': metrics.get('mae', 0),
+                'ensemble_r2': metrics.get('r2_score', 0),
+                'test_samples': len(X_test),
+                'metrics': metrics
             }
             
             return self.results
@@ -335,55 +350,30 @@ metadata = {
             print(f"Error saving models: {e}")
     
     def create_visualizations(self, X, y):
-        """Create visualization plots"""
+        """Create visualization plots (now handled by ModelEvaluator, but keeping for feature importance)"""
         try:
             X_scaled = self.scaler.transform(X)
             y_pred = self.models['ensemble'].predict(X_scaled)
             
-            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-            
-            # Actual vs Predicted
-            axes[0, 0].scatter(y, y_pred, alpha=0.6)
-            axes[0, 0].plot([y.min(), y.max()], [y.min(), y.max()], 'r--', lw=2)
-            axes[0, 0].set_xlabel('Actual Revenue')
-            axes[0, 0].set_ylabel('Predicted Revenue')
-            axes[0, 0].set_title('Actual vs Predicted Revenue')
-            
-            # Residuals
-            residuals = y - y_pred
-            axes[0, 1].scatter(y_pred, residuals, alpha=0.6)
-            axes[0, 1].axhline(y=0, color='r', linestyle='--')
-            axes[0, 1].set_xlabel('Predicted Revenue')
-            axes[0, 1].set_ylabel('Residuals')
-            axes[0, 1].set_title('Residuals Plot')
-            
-            # Feature importance
+            # Feature importance plot
             feature_importance = self._calculate_feature_importance()
             if feature_importance:
-                top_features = feature_importance[:10]
+                fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+                top_features = feature_importance[:15]
                 features, importance = zip(*top_features)
-                axes[1, 0].barh(range(len(features)), importance)
-                axes[1, 0].set_yticks(range(len(features)))
-                axes[1, 0].set_yticklabels(features)
-                axes[1, 0].set_xlabel('Importance')
-                axes[1, 0].set_title('Top 10 Feature Importance')
-            
-            # Prediction distribution
-            axes[1, 1].hist(y_pred, bins=30, alpha=0.7, label='Predicted')
-            axes[1, 1].hist(y, bins=30, alpha=0.7, label='Actual')
-            axes[1, 1].set_xlabel('Revenue')
-            axes[1, 1].set_ylabel('Frequency')
-            axes[1, 1].set_title('Revenue Distribution')
-            axes[1, 1].legend()
-            
-            plt.tight_layout()
-            
-            # Save plot
-            plot_path = "/src/data/models/subscription_forecast_plots.png"
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            print(f"Saved visualization: {plot_path}")
-            
-            plt.close()
+                ax.barh(range(len(features)), importance, color='steelblue')
+                ax.set_yticks(range(len(features)))
+                ax.set_yticklabels(features)
+                ax.set_xlabel('Importance Score', fontsize=12)
+                ax.set_title('Top 15 Feature Importance - Subscription Revenue Forecasting', 
+                           fontsize=14, fontweight='bold')
+                ax.grid(True, alpha=0.3, axis='x')
+                plt.tight_layout()
+                
+                plot_path = "/src/data/models/subscription_revenue_forecasting_feature_importance.png"
+                plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+                print(f"  ✅ Saved feature importance visualization: {plot_path}")
+                plt.close()
             
         except Exception as e:
             print(f"Visualization error: {e}")
