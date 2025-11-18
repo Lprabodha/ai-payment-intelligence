@@ -209,8 +209,8 @@ class EnhancedSubscriptionForecaster:
                 ),
                 'ridge': Ridge(
                     alpha=1.0,
-    random_state=42
-)
+                    random_state=42
+                )
             }
             
             # Train models
@@ -218,10 +218,10 @@ class EnhancedSubscriptionForecaster:
             for name, model in self.models.items():
                 print(f"Training {name}...")
                 
-model.fit(X_train_scaled, y_train)
+                model.fit(X_train_scaled, y_train)
 
                 # Evaluate
-y_pred = model.predict(X_test_scaled)
+                y_pred = model.predict(X_test_scaled)
                 mae = mean_absolute_error(y_test, y_pred)
                 model_scores[name] = mae
                 print(f"   {name} MAE: {mae:.2f}")

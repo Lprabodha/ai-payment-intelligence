@@ -12,6 +12,7 @@ WORKDIR /src
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     cron \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Dependencies stage - this layer is cached unless requirements.txt changes
