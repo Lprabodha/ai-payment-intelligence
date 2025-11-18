@@ -331,7 +331,7 @@ class EnhancedSubscriptionForecaster:
             print(f"Saved feature importance: {importance_path}")
             
             # Save metadata
-metadata = {
+            metadata = {
                 'feature_columns': self.feature_columns,
                 'model_scores': results['model_scores'],
                 'ensemble_mae': results['ensemble_mae'],
