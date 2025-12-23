@@ -282,13 +282,26 @@ class RecommendationEngine:
         amount = float(transaction.get("amount", 0.0))
         currency = transaction.get("currency", "usd")
         
-        # Extract risk information
-        fraud_detected = bool(fraud_pred.get("fraud_detected", False)) if fraud_pred else False
-        fraud_conf = float(fraud_pred.get("confidence", 0.0)) if fraud_pred else 0.0
+        # Extract risk information with safety checks
+        import math
+        fraud_detected = False
+        fraud_conf = 0.0
+        if fraud_pred and isinstance(fraud_pred, dict):
+            fraud_detected = bool(fraud_pred.get("is_fraud", False))
+            fraud_conf = fraud_pred.get("confidence_score", 0.0)
+            if fraud_conf is None or (isinstance(fraud_conf, float) and (math.isnan(fraud_conf) or math.isinf(fraud_conf))):
+                fraud_conf = 0.0
+            fraud_conf = max(0.0, min(1.0, float(fraud_conf)))
         fraud_level = self.classify_risk_level(fraud_conf, RiskType.FRAUD)
         
-        chargeback_predicted = bool(chargeback_pred.get("chargeback_predicted", False)) if chargeback_pred else False
-        chargeback_conf = float(chargeback_pred.get("confidence_score", 0.0)) if chargeback_pred else 0.0
+        chargeback_predicted = False
+        chargeback_conf = 0.0
+        if chargeback_pred and isinstance(chargeback_pred, dict):
+            chargeback_predicted = bool(chargeback_pred.get("chargeback_predicted", False))
+            chargeback_conf = chargeback_pred.get("confidence_score", 0.0)
+            if chargeback_conf is None or (isinstance(chargeback_conf, float) and (math.isnan(chargeback_conf) or math.isinf(chargeback_conf))):
+                chargeback_conf = 0.0
+            chargeback_conf = max(0.0, min(1.0, float(chargeback_conf)))
         chargeback_level = self.classify_risk_level(chargeback_conf, RiskType.CHARGEBACK)
         
         # Build customer history context
@@ -571,11 +584,14 @@ class RecommendationEngine:
         insights = []
         
         # Fraud-specific insights with severity
-        if fraud_pred and fraud_pred.get("reasons"):
-            top_reasons = fraud_pred['reasons'][:3]
-            fraud_conf = fraud_pred.get("confidence", 0)
-            severity = "CRITICAL" if fraud_conf > 0.8 else "HIGH" if fraud_conf > 0.6 else "MODERATE"
-            insights.append(f"[{severity}] Fraud indicators: {', '.join(top_reasons)}")
+        if fraud_pred and fraud_pred.get("fraud_reasons"):
+            fraud_reasons = fraud_pred['fraud_reasons']
+            # Ensure fraud_reasons is a list
+            if isinstance(fraud_reasons, list) and len(fraud_reasons) > 0:
+                top_reasons = fraud_reasons[:3]
+                fraud_conf = fraud_pred.get("confidence_score", 0)
+                severity = "CRITICAL" if fraud_conf > 0.8 else "HIGH" if fraud_conf > 0.6 else "MODERATE"
+                insights.append(f"[{severity}] Fraud indicators: {', '.join(top_reasons)}")
         
         # Chargeback-specific insights
         if chargeback_pred and chargeback_pred.get("chargeback_reason"):

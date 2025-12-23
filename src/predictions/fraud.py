@@ -110,6 +110,14 @@ def run_fraud_prediction(req: TransactionRequest) -> dict:
                 "model_type": "default"
             }
         
+        # Ensure confidence is valid (handle NaN, None, inf)
+        import math
+        if confidence is None or math.isnan(confidence) or math.isinf(confidence):
+            confidence = 0.0
+        
+        # Clamp confidence between 0 and 1
+        confidence = max(0.0, min(1.0, float(confidence)))
+        
         # Generate fraud reasons
         fraud_reasons = _generate_fraud_reasons(features, confidence)
         

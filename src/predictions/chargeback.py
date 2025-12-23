@@ -67,6 +67,14 @@ def predict_chargeback(req: TransactionRequest) -> dict:
             prediction = int(chargeback_model.predict(X_scaled)[0])
             model_type = "legacy"
         
+        # Ensure confidence is valid (handle NaN, None, inf)
+        import math
+        if confidence is None or math.isnan(confidence) or math.isinf(confidence):
+            confidence = 0.0
+        
+        # Clamp confidence between 0 and 1
+        confidence = max(0.0, min(1.0, float(confidence)))
+        
         # Generate reasons
         reasons = _generate_chargeback_reasons(features)
         
