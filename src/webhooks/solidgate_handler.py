@@ -144,12 +144,71 @@ async def _handle_solidgate_order_updated(webhook_data: dict, event_id: str = No
             # Run fraud detection
             fraud_result = _run_fraud_detection(transaction_data)
             if fraud_result:
-                print(f"Fraud detection for {transaction_id}: {fraud_result.get('is_fraud', False)} (confidence: {fraud_result.get('confidence_score', 0):.3f})")
+                print(f"✅ Fraud detection for {transaction_id}: {fraud_result.get('is_fraud', False)} (confidence: {fraud_result.get('confidence_score', 0):.3f})")
             
             # Run chargeback prediction
             chargeback_result = _run_chargeback_prediction(transaction_data)
             if chargeback_result:
-                print(f"Chargeback prediction for {transaction_id}: {chargeback_result.get('chargeback_predicted', False)} (confidence: {chargeback_result.get('confidence_score', 0):.3f})")
+                print(f"✅ Chargeback prediction for {transaction_id}: {chargeback_result.get('chargeback_predicted', False)} (confidence: {chargeback_result.get('confidence_score', 0):.3f})")
+            
+            # Generate recommendations after predictions
+            try:
+                from utils.recommendation_engine import recommendation_engine
+                import math
+                
+                # Get transaction from database for recommendations
+                transaction = db["transactions"].find_one({"transaction_id": transaction_id}) or transaction_data
+                
+                # Get fraud and chargeback results from database
+                fraud_doc = db["fraud_results"].find_one({"transaction_id": transaction_id}) or {}
+                chargeback_doc = db["chargeback_predictions"].find_one({"transaction_id": transaction_id}) or {}
+                
+                # Prepare fraud prediction dict for recommendation engine
+                fraud_pred_dict = None
+                if fraud_doc:
+                    fraud_conf = fraud_doc.get("confidence_score") or fraud_doc.get("confidence", 0.0)
+                    if fraud_conf is None or (isinstance(fraud_conf, float) and (math.isnan(fraud_conf) or math.isinf(fraud_conf))):
+                        fraud_conf = 0.0
+                    fraud_pred_dict = {
+                        "is_fraud": fraud_doc.get("is_fraud", fraud_doc.get("fraud_predicted", False)),
+                        "confidence_score": float(fraud_conf),
+                        "fraud_reasons": fraud_doc.get("fraud_reasons", [])
+                    }
+                
+                # Prepare chargeback prediction dict for recommendation engine
+                chargeback_pred_dict = None
+                if chargeback_doc:
+                    cb_confidence = chargeback_doc.get("confidence_score") or chargeback_doc.get("confidence", 0.0)
+                    if cb_confidence is None or (isinstance(cb_confidence, float) and (math.isnan(cb_confidence) or math.isinf(cb_confidence))):
+                        cb_confidence = 0.0
+                    chargeback_pred_dict = {
+                        "chargeback_predicted": chargeback_doc.get("chargeback_predicted", False),
+                        "confidence_score": float(cb_confidence),
+                        "chargeback_reason": chargeback_doc.get("chargeback_reason", "")
+                    }
+                
+                # Generate comprehensive recommendations
+                recommendations = recommendation_engine.build_comprehensive_recommendations(
+                    transaction=transaction,
+                    fraud_pred=fraud_pred_dict,
+                    chargeback_pred=chargeback_pred_dict
+                )
+                
+                # Save recommendations to transaction
+                db["transactions"].update_one(
+                    {"transaction_id": transaction_id},
+                    {"$set": {
+                        "recommendations": sanitize_for_mongo(recommendations),
+                        "updated_at": datetime.utcnow()
+                    }}
+                )
+                
+                print(f"✅ Recommendations generated and saved for {transaction_id}")
+                
+            except Exception as rec_error:
+                print(f"⚠️ Recommendation generation error for {transaction_id}: {rec_error}")
+                import traceback
+                traceback.print_exc()
             
             # Get smart routing prediction for successful payments
             if txn_status == "succeeded":
@@ -504,13 +563,20 @@ def _run_fraud_detection(transaction_data):
         fraud_result = run_fraud_prediction(fraud_request)
         
         if fraud_result and not fraud_result.get('error'):
-            # Store fraud result
+            # Ensure confidence_score is valid (handle NaN, None, etc.)
+            import math
+            confidence = fraud_result.get('confidence_score', 0.0)
+            if confidence is None or (isinstance(confidence, float) and (math.isnan(confidence) or math.isinf(confidence))):
+                confidence = 0.0
+            confidence = float(confidence)
+            
+            # Store fraud result with correct field names
             db["fraud_results"].update_one(
                 {"transaction_id": transaction_data.get('transaction_id')},
                 {"$set": {
                     "transaction_id": transaction_data.get('transaction_id'),
-                    "fraud_predicted": fraud_result.get('is_fraud', False),
-                    "confidence": fraud_result.get('confidence_score', 0),
+                    "is_fraud": fraud_result.get('is_fraud', False),
+                    "confidence_score": confidence,
                     "risk_level": fraud_result.get('risk_level', 'medium'),
                     "model_type": fraud_result.get('model_type', 'default'),
                     "fraud_reasons": fraud_result.get('fraud_reasons', []),
@@ -558,13 +624,21 @@ def _run_chargeback_prediction(transaction_data):
         chargeback_result = predict_chargeback(chargeback_request)
         
         if chargeback_result and not chargeback_result.get('error'):
-            # Store chargeback result
+            # Ensure confidence_score is valid (handle NaN, None, etc.)
+            import math
+            confidence = chargeback_result.get('confidence_score', 0.0)
+            if confidence is None or (isinstance(confidence, float) and (math.isnan(confidence) or math.isinf(confidence))):
+                confidence = 0.0
+            confidence = float(confidence)
+            
+            # Store chargeback result with correct field name
             db["chargeback_predictions"].update_one(
                 {"transaction_id": transaction_data.get('transaction_id')},
                 {"$set": {
                     "transaction_id": transaction_data.get('transaction_id'),
+                    "email": transaction_data.get('email', ''),
                     "chargeback_predicted": chargeback_result.get('chargeback_predicted', False),
-                    "confidence": chargeback_result.get('confidence_score', 0),
+                    "confidence_score": confidence,
                     "chargeback_reason": chargeback_result.get('chargeback_reason', 'No specific reason'),
                     "model_type": chargeback_result.get('model_type', 'default'),
                     "created_at": datetime.utcnow()

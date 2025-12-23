@@ -118,10 +118,30 @@ def run_fraud_prediction(req: TransactionRequest) -> dict:
         # Clamp confidence between 0 and 1
         confidence = max(0.0, min(1.0, float(confidence)))
         
+        # Apply Stripe Radar overrides based on risk_score (0-100 scale)
+        from config.settings import settings
+        stripe_risk_score = float(req.risk_score or 0)
+        override_applied = False
+        
+        # High override: if Stripe risk_score >= 65, force high confidence and mark as fraud
+        if stripe_risk_score >= settings.RADAR_HIGH_OVERRIDE:
+            prediction = 1  # Force fraud detection
+            confidence = max(confidence, 0.90)  # At least 90% confidence
+            override_applied = True
+        # Medium hint: if Stripe risk_score >= 55, boost confidence to at least 50%
+        elif stripe_risk_score >= settings.RADAR_MEDIUM_HINT:
+            confidence = max(confidence, 0.50)  # At least 50% confidence
+        
         # Generate fraud reasons
         fraud_reasons = _generate_fraud_reasons(features, confidence)
         
-        # Classify risk level
+        # Add Stripe Radar override reason if applied
+        if override_applied:
+            fraud_reasons.append(f"Stripe risk score ≥ {settings.RADAR_HIGH_OVERRIDE} (auto-flagged high risk)")
+        elif stripe_risk_score >= settings.RADAR_MEDIUM_HINT:
+            fraud_reasons.append(f"Stripe risk score ≥ {settings.RADAR_MEDIUM_HINT} (confidence boosted)")
+        
+        # Classify risk level based on final confidence
         risk_level = classify_risk_level(confidence)
         
         return {

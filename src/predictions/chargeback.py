@@ -75,8 +75,31 @@ def predict_chargeback(req: TransactionRequest) -> dict:
         # Clamp confidence between 0 and 1
         confidence = max(0.0, min(1.0, float(confidence)))
         
+        # Apply Stripe Radar overrides based on risk_score (0-100 scale)
+        from config.settings import settings
+        stripe_risk_score = float(req.risk_score or 0)
+        override_applied = False
+        
+        # High override: if Stripe risk_score >= 65, boost chargeback confidence significantly
+        if stripe_risk_score >= settings.RADAR_HIGH_OVERRIDE:
+            confidence = max(confidence, 0.75)  # At least 75% chargeback confidence
+            override_applied = True
+        # Medium hint: if Stripe risk_score >= 55, boost confidence to at least 40%
+        elif stripe_risk_score >= settings.RADAR_MEDIUM_HINT:
+            confidence = max(confidence, 0.40)  # At least 40% chargeback confidence
+        
+        # Also consider marking as predicted if risk score is very high
+        if stripe_risk_score >= settings.RADAR_HIGH_OVERRIDE and confidence >= 0.70:
+            prediction = 1  # Mark as chargeback predicted if high risk
+        
         # Generate reasons
         reasons = _generate_chargeback_reasons(features)
+        
+        # Add Stripe Radar override reason if applied
+        if override_applied:
+            reasons.append(f"Stripe risk score ≥ {settings.RADAR_HIGH_OVERRIDE} (high chargeback risk indicated)")
+        elif stripe_risk_score >= settings.RADAR_MEDIUM_HINT:
+            reasons.append(f"Stripe risk score ≥ {settings.RADAR_MEDIUM_HINT} (chargeback confidence boosted)")
         
         return {
             "chargeback_predicted": bool(prediction),
