@@ -66,98 +66,171 @@ async def _handle_solidgate_order_updated(webhook_data: dict, event_id: str = No
             paid = False
             captured = False
         
-        # Check if transaction already exists
+        # Build comprehensive transaction object
+        transaction = {
+            "transaction_id": transaction_id,
+            "email": order_data.get('customer_email', 'unknown@example.com'),
+            "amount": float(order_data.get('amount', 0)) / 100,
+            "currency": order_data.get('currency', 'usd').lower(),
+            "gateway": "Solidgate",
+            "status": txn_status,
+            "payment_method": order_data.get('payment_method', 'card'),
+            "card_brand": card_data.get('brand'),
+            "card_country": card_data.get('country'),
+            "fingerprint": card_data.get('card_id'),
+            "funding_type": card_data.get('card_type', '').lower(),
+            "three_d_secure": order_data.get('three_d_secure'),
+            "cvc_check": order_data.get('cvc_check'),
+            "address_line1_check": order_data.get('address_line1_check'),
+            "postal_code_check": order_data.get('postal_code_check'),
+            "risk_score": order_data.get('risk_score', 0),
+            "seller_message": order_data.get('seller_message'),
+            "network_status": order_data.get('network_status'),
+            "outcome_type": order_data.get('outcome_type'),
+            "ip_address": order_data.get('ip_address', 'unknown'),
+            "billing_name": card_data.get('card_holder'),
+            "billing_email": order_data.get('customer_email'),
+            "billing_phone": order_data.get('customer_phone'),
+            "billing_country": order_data.get('geo_country') or card_data.get('country'),
+            "billing_address_line1": order_data.get('billing_address_line1'),
+            "billing_address_line2": order_data.get('billing_address_line2'),
+            "billing_address_postal_code": order_data.get('billing_address_postal_code'),
+            "billing_address_city": order_data.get('billing_address_city'),
+            "billing_address_state": order_data.get('billing_address_state'),
+            "refunded": order_data.get('refunded', False),
+            "amount_refunded": float(order_data.get('amount_refunded', 0)) / 100 if order_data.get('amount_refunded') else 0,
+            "disputed": order_data.get('disputed', False),
+            "captured": captured,
+            "paid": paid,
+            "created_at": datetime.fromisoformat(order_data.get('created_at').replace('Z', '+00:00')) if order_data.get('created_at') else datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        }
+        
+        # Save or update transaction in database
         existing_txn = db["transactions"].find_one({"transaction_id": transaction_id})
         if existing_txn:
-            print(f"Transaction {transaction_id} already exists, updating status to {txn_status}")
+            print(f"Transaction {transaction_id} already exists, updating with latest data")
             db["transactions"].update_one(
                 {"transaction_id": transaction_id},
-                {"$set": {
-                    "status": txn_status,
-                    "paid": paid,
-                    "captured": captured,
-                    "updated_at": datetime.utcnow()
-                }}
+                {"$set": sanitize_for_mongo(transaction)}
             )
         else:
-            # Create new transaction record
-            transaction = {
-                "transaction_id": transaction_id,
-                "email": order_data.get('customer_email', 'unknown@example.com'),
-                "amount": float(order_data.get('amount', 0)) / 100,
-                "currency": order_data.get('currency', 'usd').lower(),
-                "gateway": "Solidgate",
-                "status": txn_status,
-                "payment_method": order_data.get('payment_method', 'card'),
-                "card_brand": card_data.get('brand'),
-                "card_country": card_data.get('country'),
-                "fingerprint": card_data.get('card_id'),
-                "funding_type": card_data.get('card_type', '').lower(),
-                "three_d_secure": None,
-                "cvc_check": None,
-                "address_line1_check": None,
-                "postal_code_check": None,
-                "risk_level": None,
-                "risk_score": order_data.get('risk_score'),
-                "seller_message": order_data.get('seller_message'),
-                "network_status": order_data.get('network_status'),
-                "outcome_type": order_data.get('outcome_type'),
-                "ip_address": order_data.get('ip_address', 'unknown'),
-                "billing_name": card_data.get('card_holder'),
-                "billing_email": order_data.get('customer_email'),
-                "billing_phone": None,
-                "billing_address_country": order_data.get('geo_country'),
-                "billing_address_line1": None,
-                "billing_address_line2": None,
-                "billing_address_postal_code": None,
-                "billing_address_city": None,
-                "billing_address_state": None,
-                "refunded": False,
-                "amount_refunded": 0,
-                "disputed": False,
-                "captured": captured,
-                "paid": paid,
-                "created_at": datetime.fromisoformat(order_data.get('created_at').replace('Z', '+00:00')) if order_data.get('created_at') else datetime.utcnow(),
-                "updated_at": datetime.utcnow()
-            }
-            
             db["transactions"].insert_one(sanitize_for_mongo(transaction))
             print(f"New Solidgate transaction saved: {transaction_id}")
         
-        # Run fraud detection and chargeback prediction for all transactions
-        if transaction_id:
-            # Prepare transaction data for predictions
+        if transaction_id and txn_status == "succeeded":
+            db_transaction = db["transactions"].find_one({"transaction_id": transaction_id}) or transaction
+            
+            # Ensure all required fields have valid values (no None for required string fields)
+            fingerprint_value = db_transaction.get('fingerprint') or card_data.get('card_id') or ""
+            funding_type_value = db_transaction.get('funding_type') or card_data.get('card_type', '').lower() or "credit"
+            
             transaction_data = {
                 "transaction_id": transaction_id,
-                "email": order_data.get('customer_email', 'unknown@example.com'),
-                "amount": float(order_data.get('amount', 0)) / 100,
-                "currency": order_data.get('currency', 'usd').lower(),
-                "card_brand": card_data.get('brand', 'VISA'),
-                "card_country": card_data.get('country', 'US'),
-                "ip_address": order_data.get('ip_address', 'unknown'),
-                "fingerprint": card_data.get('card_id'),
-                "risk_score": order_data.get('risk_score', 0),
+                "email": db_transaction.get('email', order_data.get('customer_email', 'unknown@example.com')),
+                "amount": db_transaction.get('amount', float(order_data.get('amount', 0)) / 100),
+                "currency": db_transaction.get('currency', order_data.get('currency', 'usd').lower()),
+                "card_brand": db_transaction.get('card_brand', card_data.get('brand', 'VISA')),
+                "card_country": db_transaction.get('card_country', card_data.get('country', 'US')),
+                "billing_country": db_transaction.get('billing_country') or db_transaction.get('billing_address_country') or card_data.get('country', 'US'),
+                "ip_address": db_transaction.get('ip_address', order_data.get('ip_address', 'unknown')),
+                "fingerprint": fingerprint_value,
+                "funding_type": funding_type_value,
+                "risk_score": db_transaction.get('risk_score', order_data.get('risk_score', 0)),
+                "three_d_secure": db_transaction.get('three_d_secure'),
+                "cvc_check": db_transaction.get('cvc_check'),
+                "address_line1_check": db_transaction.get('address_line1_check'),
+                "postal_code_check": db_transaction.get('postal_code_check'),
+                "outcome_type": db_transaction.get('outcome_type', order_data.get('outcome_type')),
+                "seller_message": db_transaction.get('seller_message', order_data.get('seller_message')),
+                "network_status": db_transaction.get('network_status', order_data.get('network_status')),
                 "status": txn_status,
                 "gateway": "Solidgate"
             }
             
-            # Run fraud detection
-            fraud_result = _run_fraud_detection(transaction_data)
-            if fraud_result:
-                print(f"✅ Fraud detection for {transaction_id}: {fraud_result.get('is_fraud', False)} (confidence: {fraud_result.get('confidence_score', 0):.3f})")
+            # Run fraud detection using process_fraud_workflow (same as Stripe)
+            try:
+                from predictions.fraud import process_fraud_workflow
+                
+                # Use the full transaction object from database (same format as Stripe expects)
+                fraud_result = process_fraud_workflow(db_transaction)
+                if fraud_result:
+                    print(f"✅ Fraud detection for {transaction_id}: {fraud_result.get('is_fraud', False)} (confidence: {fraud_result.get('confidence_score', 0):.3f})")
+                else:
+                    print(f"⚠️ Fraud detection returned no result for {transaction_id}")
+            except Exception as fraud_error:
+                print(f"❌ Fraud detection error for {transaction_id}: {fraud_error}")
+                import traceback
+                traceback.print_exc()
             
-            # Run chargeback prediction
-            chargeback_result = _run_chargeback_prediction(transaction_data)
-            if chargeback_result:
-                print(f"✅ Chargeback prediction for {transaction_id}: {chargeback_result.get('chargeback_predicted', False)} (confidence: {chargeback_result.get('confidence_score', 0):.3f})")
+            # Run chargeback prediction using predict_chargeback (same as Stripe)
+            try:
+                from predictions.chargeback import predict_chargeback
+                from models.schemas import TransactionRequest
+                import math
+                
+                # Create TransactionRequest from transaction (same as Stripe)
+                chargeback_req = TransactionRequest(
+                    amount=db_transaction.get("amount", 0.0),
+                    currency=db_transaction.get("currency", "usd"),
+                    email=db_transaction.get("email", ""),
+                    ip_address=db_transaction.get("ip_address", ""),
+                    card_country=db_transaction.get("card_country", ""),
+                    billing_country=db_transaction.get("billing_country") or db_transaction.get("billing_address_country") or "",
+                    card_brand=db_transaction.get("card_brand", ""),
+                    funding_type=db_transaction.get("funding_type", "") or "",
+                    fingerprint=db_transaction.get("fingerprint", "") or "",
+                    risk_score=db_transaction.get("risk_score", 0),
+                    three_d_secure=db_transaction.get("three_d_secure"),
+                    cvc_check=db_transaction.get("cvc_check"),
+                    address_line1_check=db_transaction.get("address_line1_check"),
+                    postal_code_check=db_transaction.get("postal_code_check"),
+                    outcome_type=db_transaction.get("outcome_type"),
+                    seller_message=db_transaction.get("seller_message"),
+                    network_status=db_transaction.get("network_status")
+                )
+                
+                chargeback_result = predict_chargeback(chargeback_req)
+                
+                # Ensure confidence_score is valid (handle NaN, None, etc.)
+                if chargeback_result:
+                    confidence = chargeback_result.get("confidence_score", 0.0)
+                    if confidence is None or (isinstance(confidence, float) and (math.isnan(confidence) or math.isinf(confidence))):
+                        confidence = 0.0
+                    else:
+                        confidence = float(confidence)
+                    
+                    chargeback_result["confidence_score"] = confidence
+                    
+                    # Store chargeback prediction (same as Stripe)
+                    db["chargeback_predictions"].update_one(
+                        {"transaction_id": transaction_id},
+                        {"$set": {
+                            "transaction_id": transaction_id,
+                            "email": db_transaction.get("email"),
+                            "chargeback_predicted": chargeback_result.get("chargeback_predicted", False),
+                            "confidence_score": confidence,
+                            "chargeback_reason": chargeback_result.get("chargeback_reason", ""),
+                            "model_type": chargeback_result.get("model_type", "default"),
+                            "created_at": datetime.utcnow()
+                        }},
+                        upsert=True
+                    )
+                    print(f"✅ Chargeback prediction for {transaction_id}: {chargeback_result.get('chargeback_predicted', False)} (confidence: {confidence:.3f})")
+                else:
+                    print(f"⚠️ Chargeback prediction returned no result for {transaction_id}")
+            except Exception as cb_error:
+                print(f"❌ Chargeback prediction error for {transaction_id}: {cb_error}")
+                import traceback
+                traceback.print_exc()
             
             # Generate recommendations after predictions
             try:
                 from utils.recommendation_engine import recommendation_engine
                 import math
                 
-                # Get transaction from database for recommendations
-                transaction = db["transactions"].find_one({"transaction_id": transaction_id}) or transaction_data
+                # Get full transaction from database for recommendations (ensure we have all fields)
+                db_transaction_for_rec = db["transactions"].find_one({"transaction_id": transaction_id}) or transaction
                 
                 # Get fraud and chargeback results from database
                 fraud_doc = db["fraud_results"].find_one({"transaction_id": transaction_id}) or {}
@@ -189,21 +262,41 @@ async def _handle_solidgate_order_updated(webhook_data: dict, event_id: str = No
                 
                 # Generate comprehensive recommendations
                 recommendations = recommendation_engine.build_comprehensive_recommendations(
-                    transaction=transaction,
+                    transaction=db_transaction_for_rec,
                     fraud_pred=fraud_pred_dict,
                     chargeback_pred=chargeback_pred_dict
                 )
                 
-                # Save recommendations to transaction
+                # Extract risk_level from recommendations
+                risk_level = recommendations.get("risk_level", "unknown")
+                overall_priority = recommendations.get("overall_priority", "low")
+                combined_risk_score = recommendations.get("combined_risk_score", 0.0)
+                
+                # Save recommendations to separate recommendations collection
+                recommendations_doc = sanitize_for_mongo(recommendations)
+                recommendations_doc["_id"] = f"rec_{transaction_id}"
+                recommendations_doc["transaction_id"] = transaction_id
+                
+                db["recommendations"].replace_one(
+                    {"transaction_id": transaction_id},
+                    recommendations_doc,
+                    upsert=True
+                )
+                
+
                 db["transactions"].update_one(
                     {"transaction_id": transaction_id},
                     {"$set": {
-                        "recommendations": sanitize_for_mongo(recommendations),
+                        "risk_level": risk_level,
+                        "overall_priority": overall_priority,
+                        "combined_risk_score": combined_risk_score,
+                        "recommendations_id": f"rec_{transaction_id}",
+                        "recommendations": sanitize_for_mongo(recommendations),  # Keep for backward compatibility
                         "updated_at": datetime.utcnow()
                     }}
                 )
                 
-                print(f"✅ Recommendations generated and saved for {transaction_id}")
+                print(f"✅ Recommendations generated and saved for {transaction_id} (risk_level: {risk_level}, priority: {overall_priority})")
                 
             except Exception as rec_error:
                 print(f"⚠️ Recommendation generation error for {transaction_id}: {rec_error}")
@@ -353,6 +446,25 @@ async def _handle_solidgate_subscription_created(webhook_data: dict, event_id: s
         customer_data = webhook_data.get('customer', {})
         product_data = webhook_data.get('product', {})
         
+        # Save customer data
+        if customer_data:
+            customer_email = customer_data.get('customer_email') or customer_data.get('email')
+            if customer_email:
+                customer_record = {
+                    "email": customer_email,
+                    "name": customer_data.get('customer_name') or customer_data.get('name'),
+                    "phone": customer_data.get('customer_phone') or customer_data.get('phone'),
+                    "gateway_customer_ids": {"solidgate": customer_data.get('customer_id') or customer_data.get('id')},
+                    "created_at": datetime.fromisoformat(customer_data.get('created_at').replace('Z', '+00:00')) if customer_data.get('created_at') else datetime.utcnow(),
+                    "updated_at": datetime.utcnow()
+                }
+                db["customers"].update_one(
+                    {"email": customer_email},
+                    {"$set": sanitize_for_mongo(customer_record)},
+                    upsert=True
+                )
+                print(f"✅ Customer saved: {customer_email}")
+        
         # Create subscription record for new subscription
         subscription = {
             "subscription_id": subscription_id,
@@ -412,6 +524,30 @@ async def _handle_solidgate_subscription_activated(webhook_data: dict, event_id:
             print("No subscription ID found in Solidgate subscription activated webhook")
             return
         
+        # Extract customer and order data
+        customer_data = webhook_data.get('customer', {})
+        order_data = webhook_data.get('order', {})  # May contain payment info
+        product_data = webhook_data.get('product', {})
+        
+        # Save customer data
+        if customer_data:
+            customer_email = customer_data.get('customer_email') or customer_data.get('email')
+            if customer_email:
+                customer_record = {
+                    "email": customer_email,
+                    "name": customer_data.get('customer_name') or customer_data.get('name'),
+                    "phone": customer_data.get('customer_phone') or customer_data.get('phone'),
+                    "gateway_customer_ids": {"solidgate": customer_data.get('customer_id') or customer_data.get('id')},
+                    "created_at": datetime.fromisoformat(customer_data.get('created_at').replace('Z', '+00:00')) if customer_data.get('created_at') else datetime.utcnow(),
+                    "updated_at": datetime.utcnow()
+                }
+                db["customers"].update_one(
+                    {"email": customer_email},
+                    {"$set": sanitize_for_mongo(customer_record)},
+                    upsert=True
+                )
+                print(f"✅ Customer saved: {customer_email}")
+        
         # Update subscription to active status
         db["subscriptions"].update_one(
             {"subscription_id": subscription_id},
@@ -423,11 +559,227 @@ async def _handle_solidgate_subscription_activated(webhook_data: dict, event_id:
             }}
         )
         
+        # Create transaction record if order data is available (initial payment)
+        transaction_id = order_data.get('order_id') or order_data.get('id') or f"sub_{subscription_id}_{int(datetime.utcnow().timestamp())}"
+        card_data = order_data.get('card', {})
+        
+        if order_data or subscription_data:
+            # Build transaction from order data or subscription data
+            transaction = {
+                "transaction_id": transaction_id,
+                "subscription_id": subscription_id,
+                "email": customer_data.get('customer_email') or customer_data.get('email', 'unknown@example.com'),
+                "amount": float(order_data.get('amount', product_data.get('amount', 0))) / 100,
+                "currency": order_data.get('currency', product_data.get('currency', 'usd')).lower(),
+                "gateway": "Solidgate",
+                "status": "succeeded",  # Subscription activated means payment succeeded
+                "payment_method": order_data.get('payment_method', 'card'),
+                "card_brand": card_data.get('brand'),
+                "card_country": card_data.get('country'),
+                "fingerprint": card_data.get('card_id') or "",
+                "funding_type": card_data.get('card_type', '').lower() or "credit",
+                "three_d_secure": order_data.get('three_d_secure'),
+                "cvc_check": order_data.get('cvc_check'),
+                "address_line1_check": order_data.get('address_line1_check'),
+                "postal_code_check": order_data.get('postal_code_check'),
+                "risk_score": order_data.get('risk_score', 0),
+                "seller_message": order_data.get('seller_message'),
+                "network_status": order_data.get('network_status'),
+                "outcome_type": order_data.get('outcome_type'),
+                "ip_address": order_data.get('ip_address', 'unknown'),
+                "billing_name": card_data.get('card_holder'),
+                "billing_email": customer_data.get('customer_email') or customer_data.get('email'),
+                "billing_phone": customer_data.get('customer_phone') or customer_data.get('phone'),
+                "billing_country": order_data.get('geo_country') or card_data.get('country'),
+                "billing_address_line1": order_data.get('billing_address_line1'),
+                "billing_address_line2": order_data.get('billing_address_line2'),
+                "billing_address_postal_code": order_data.get('billing_address_postal_code'),
+                "billing_address_city": order_data.get('billing_address_city'),
+                "billing_address_state": order_data.get('billing_address_state'),
+                "refunded": False,
+                "amount_refunded": 0,
+                "disputed": False,
+                "captured": True,
+                "paid": True,
+                "created_at": datetime.fromisoformat(order_data.get('created_at').replace('Z', '+00:00')) if order_data.get('created_at') else datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
+            
+            # Save transaction
+            db["transactions"].update_one(
+                {"transaction_id": transaction_id},
+                {"$set": sanitize_for_mongo(transaction)},
+                upsert=True
+            )
+            print(f"✅ Transaction saved for activated subscription: {transaction_id}")
+            
+            # Run fraud and chargeback predictions using same methods as Stripe
+            try:
+                # Get full transaction from database (same format as Stripe expects)
+                db_transaction = db["transactions"].find_one({"transaction_id": transaction_id}) or transaction
+                
+                # Run fraud detection using process_fraud_workflow (same as Stripe)
+                try:
+                    from predictions.fraud import process_fraud_workflow
+                    
+                    fraud_result = process_fraud_workflow(db_transaction)
+                    if fraud_result:
+                        print(f"✅ Fraud detection for {transaction_id}: {fraud_result.get('is_fraud', False)} (confidence: {fraud_result.get('confidence_score', 0):.3f})")
+                    else:
+                        print(f"⚠️ Fraud detection returned no result for {transaction_id}")
+                except Exception as fraud_error:
+                    print(f"❌ Fraud detection error for {transaction_id}: {fraud_error}")
+                    import traceback
+                    traceback.print_exc()
+                
+                # Run chargeback prediction using predict_chargeback (same as Stripe)
+                try:
+                    from predictions.chargeback import predict_chargeback
+                    from models.schemas import TransactionRequest
+                    import math
+                    
+                    # Create TransactionRequest from transaction (same as Stripe)
+                    chargeback_req = TransactionRequest(
+                        amount=db_transaction.get("amount", 0.0),
+                        currency=db_transaction.get("currency", "usd"),
+                        email=db_transaction.get("email", ""),
+                        ip_address=db_transaction.get("ip_address", ""),
+                        card_country=db_transaction.get("card_country", ""),
+                        billing_country=db_transaction.get("billing_country") or db_transaction.get("billing_address_country") or "",
+                        card_brand=db_transaction.get("card_brand", ""),
+                        funding_type=db_transaction.get("funding_type", "") or "",
+                        fingerprint=db_transaction.get("fingerprint", "") or "",
+                        risk_score=db_transaction.get("risk_score", 0),
+                        three_d_secure=db_transaction.get("three_d_secure"),
+                        cvc_check=db_transaction.get("cvc_check"),
+                        address_line1_check=db_transaction.get("address_line1_check"),
+                        postal_code_check=db_transaction.get("postal_code_check"),
+                        outcome_type=db_transaction.get("outcome_type"),
+                        seller_message=db_transaction.get("seller_message"),
+                        network_status=db_transaction.get("network_status")
+                    )
+                    
+                    chargeback_result = predict_chargeback(chargeback_req)
+                    
+                    # Ensure confidence_score is valid (handle NaN, None, etc.)
+                    if chargeback_result:
+                        confidence = chargeback_result.get("confidence_score", 0.0)
+                        if confidence is None or (isinstance(confidence, float) and (math.isnan(confidence) or math.isinf(confidence))):
+                            confidence = 0.0
+                        else:
+                            confidence = float(confidence)
+                        
+                        chargeback_result["confidence_score"] = confidence
+                        
+                        # Store chargeback prediction (same as Stripe)
+                        db["chargeback_predictions"].update_one(
+                            {"transaction_id": transaction_id},
+                            {"$set": {
+                                "transaction_id": transaction_id,
+                                "email": db_transaction.get("email"),
+                                "chargeback_predicted": chargeback_result.get("chargeback_predicted", False),
+                                "confidence_score": confidence,
+                                "chargeback_reason": chargeback_result.get("chargeback_reason", ""),
+                                "model_type": chargeback_result.get("model_type", "default"),
+                                "created_at": datetime.utcnow()
+                            }},
+                            upsert=True
+                        )
+                        print(f"✅ Chargeback prediction for {transaction_id}: {chargeback_result.get('chargeback_predicted', False)} (confidence: {confidence:.3f})")
+                    else:
+                        print(f"⚠️ Chargeback prediction returned no result for {transaction_id}")
+                except Exception as cb_error:
+                    print(f"❌ Chargeback prediction error for {transaction_id}: {cb_error}")
+                    import traceback
+                    traceback.print_exc()
+                
+                # Generate recommendations
+                try:
+                    from utils.recommendation_engine import recommendation_engine
+                    import math
+                    
+                    db_transaction_for_rec = db["transactions"].find_one({"transaction_id": transaction_id}) or transaction
+                    
+                    # Get fraud and chargeback results from database
+                    fraud_doc = db["fraud_results"].find_one({"transaction_id": transaction_id}) or {}
+                    chargeback_doc = db["chargeback_predictions"].find_one({"transaction_id": transaction_id}) or {}
+                    
+                    # Prepare fraud prediction dict
+                    fraud_pred_dict = None
+                    if fraud_doc:
+                        fraud_conf = fraud_doc.get("confidence_score") or fraud_doc.get("confidence", 0.0)
+                        if fraud_conf is None or (isinstance(fraud_conf, float) and (math.isnan(fraud_conf) or math.isinf(fraud_conf))):
+                            fraud_conf = 0.0
+                        fraud_pred_dict = {
+                            "is_fraud": fraud_doc.get("is_fraud", False),
+                            "confidence_score": float(fraud_conf),
+                            "fraud_reasons": fraud_doc.get("fraud_reasons", [])
+                        }
+                    
+                    # Prepare chargeback prediction dict
+                    chargeback_pred_dict = None
+                    if chargeback_doc:
+                        cb_confidence = chargeback_doc.get("confidence_score") or chargeback_doc.get("confidence", 0.0)
+                        if cb_confidence is None or (isinstance(cb_confidence, float) and (math.isnan(cb_confidence) or math.isinf(cb_confidence))):
+                            cb_confidence = 0.0
+                        chargeback_pred_dict = {
+                            "chargeback_predicted": chargeback_doc.get("chargeback_predicted", False),
+                            "confidence_score": float(cb_confidence),
+                            "chargeback_reason": chargeback_doc.get("chargeback_reason", "")
+                        }
+                    
+                    # Generate recommendations
+                    recommendations = recommendation_engine.build_comprehensive_recommendations(
+                        transaction=db_transaction_for_rec,
+                        fraud_pred=fraud_pred_dict,
+                        chargeback_pred=chargeback_pred_dict
+                    )
+                    
+                    # Extract risk_level from recommendations
+                    risk_level = recommendations.get("risk_level", "unknown")
+                    overall_priority = recommendations.get("overall_priority", "low")
+                    combined_risk_score = recommendations.get("combined_risk_score", 0.0)
+                    
+                    # Save recommendations
+                    recommendations_doc = sanitize_for_mongo(recommendations)
+                    recommendations_doc["_id"] = f"rec_{transaction_id}"
+                    recommendations_doc["transaction_id"] = transaction_id
+                    
+                    db["recommendations"].replace_one(
+                        {"transaction_id": transaction_id},
+                        recommendations_doc,
+                        upsert=True
+                    )
+                    
+                    # Update transaction with risk_level, priority
+                    db["transactions"].update_one(
+                        {"transaction_id": transaction_id},
+                        {"$set": {
+                            "risk_level": risk_level,
+                            "overall_priority": overall_priority,
+                            "combined_risk_score": combined_risk_score,
+                            "recommendations_id": f"rec_{transaction_id}",
+                            "recommendations": sanitize_for_mongo(recommendations),
+                            "updated_at": datetime.utcnow()
+                        }}
+                    )
+                    
+                    print(f"✅ Recommendations generated for {transaction_id} (risk_level: {risk_level}, priority: {overall_priority})")
+                except Exception as rec_error:
+                    print(f"⚠️ Recommendation generation error for {transaction_id}: {rec_error}")
+                    import traceback
+                    traceback.print_exc()
+                    
+            except Exception as pred_error:
+                print(f"⚠️ Prediction error for {transaction_id}: {pred_error}")
+                import traceback
+                traceback.print_exc()
+        
         # Get updated subscription for revenue prediction
         updated_subscription = db["subscriptions"].find_one({"subscription_id": subscription_id})
         if updated_subscription:
             revenue_prediction = _get_subscription_revenue_prediction({
-                'price_amount': updated_subscription['price_amount'],
+                'price_amount': updated_subscription.get('price_amount', float(product_data.get('amount', 0)) / 100),
                 'account_age_days': 0,  # Just activated
                 'renewal_count': 1,
                 'subscription_duration_days': 30
@@ -464,6 +816,8 @@ async def _handle_solidgate_subscription_activated(webhook_data: dict, event_id:
         
     except Exception as e:
         print(f"Error handling Solidgate subscription activation: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def _handle_solidgate_subscription_renewed(webhook_data: dict, event_id: str = None):
     """Handle subscription renewal (callback_type: renew) from Solidgate"""
@@ -538,7 +892,7 @@ def _run_fraud_detection(transaction_data):
         from predictions.fraud import run_fraud_prediction
         from models.schemas import TransactionRequest
         
-        # Prepare fraud detection request
+        # Prepare fraud detection request - ensure None values are converted to empty strings
         fraud_request = TransactionRequest(
             amount=transaction_data.get('amount', 0.0),
             currency=transaction_data.get('currency', 'usd'),
@@ -547,8 +901,8 @@ def _run_fraud_detection(transaction_data):
             card_country=transaction_data.get('card_country', ''),
             billing_country=transaction_data.get('billing_country', ''),
             card_brand=transaction_data.get('card_brand', ''),
-            funding_type=transaction_data.get('funding_type', ''),
-            fingerprint=transaction_data.get('fingerprint', ''),
+            funding_type=transaction_data.get('funding_type', '') or '',
+            fingerprint=transaction_data.get('fingerprint', '') or '',
             risk_score=transaction_data.get('risk_score', 0),
             three_d_secure=transaction_data.get('three_d_secure'),
             cvc_check=transaction_data.get('cvc_check'),
@@ -599,7 +953,7 @@ def _run_chargeback_prediction(transaction_data):
         from predictions.chargeback import predict_chargeback
         from models.schemas import TransactionRequest
         
-        # Prepare chargeback prediction request
+        # Prepare chargeback prediction request - ensure None values are converted to empty strings
         chargeback_request = TransactionRequest(
             amount=transaction_data.get('amount', 0.0),
             currency=transaction_data.get('currency', 'usd'),
@@ -608,8 +962,8 @@ def _run_chargeback_prediction(transaction_data):
             card_country=transaction_data.get('card_country', ''),
             billing_country=transaction_data.get('billing_country', ''),
             card_brand=transaction_data.get('card_brand', ''),
-            funding_type=transaction_data.get('funding_type', ''),
-            fingerprint=transaction_data.get('fingerprint', ''),
+            funding_type=transaction_data.get('funding_type', '') or '',
+            fingerprint=transaction_data.get('fingerprint', '') or '',
             risk_score=transaction_data.get('risk_score', 0),
             three_d_secure=transaction_data.get('three_d_secure'),
             cvc_check=transaction_data.get('cvc_check'),

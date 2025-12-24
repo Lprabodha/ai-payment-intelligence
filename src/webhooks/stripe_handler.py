@@ -413,16 +413,36 @@ async def _handle_invoice_paid(obj):
                     chargeback_pred=chargeback_pred_dict
                 )
                 
-                # Save recommendations to transaction
+                # Extract risk_level from recommendations
+                risk_level = recommendations.get("risk_level", "unknown")
+                overall_priority = recommendations.get("overall_priority", "low")
+                combined_risk_score = recommendations.get("combined_risk_score", 0.0)
+                
+                # Save recommendations to separate recommendations collection
+                recommendations_doc = sanitize_for_mongo(recommendations)
+                recommendations_doc["_id"] = f"rec_{charge_id}"
+                recommendations_doc["transaction_id"] = charge_id
+                
+                db["recommendations"].replace_one(
+                    {"transaction_id": charge_id},
+                    recommendations_doc,
+                    upsert=True
+                )
+                
+                # Update transaction with risk_level, priority, and link to recommendations
                 db["transactions"].update_one(
                     {"transaction_id": charge_id},
                     {"$set": {
-                        "recommendations": sanitize_for_mongo(recommendations),
+                        "risk_level": risk_level,
+                        "overall_priority": overall_priority,
+                        "combined_risk_score": combined_risk_score,
+                        "recommendations_id": f"rec_{charge_id}",
+                        "recommendations": sanitize_for_mongo(recommendations),  # Keep for backward compatibility
                         "updated_at": datetime.utcnow()
                     }}
                 )
                 
-                print(f"✅ Recommendations generated and saved for {charge_id}")
+                print(f"✅ Recommendations generated and saved for {charge_id} (risk_level: {risk_level}, priority: {overall_priority})")
                 
             except Exception as rec_error:
                 print(f"⚠️ Recommendation generation error for {charge_id}: {rec_error}")

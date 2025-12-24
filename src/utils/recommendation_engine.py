@@ -87,21 +87,31 @@ class RecommendationEngine:
         })
 
     def classify_risk_level(self, confidence: float, risk_type: RiskType) -> RiskLevel:
-        """Classify risk level based on confidence score and risk type"""
+        """
+        Classify risk level based on confidence score and risk type.
+        Production-optimized thresholds for fraud and chargeback detection.
+        """
+        # Ensure confidence is valid and clamped
+        confidence = max(0.0, min(1.0, float(confidence)))
+        
         if risk_type == RiskType.FRAUD:
+            # Fraud thresholds (more sensitive - fraud is costly)
             if confidence >= 0.85:
                 return RiskLevel.CRITICAL
             elif confidence >= 0.65:
                 return RiskLevel.HIGH
-            elif confidence >= 0.35:
+            elif confidence >= 0.40:
                 return RiskLevel.MEDIUM
+            # Below 0.40 is LOW
         elif risk_type == RiskType.CHARGEBACK:
+            # Chargeback thresholds (moderate sensitivity)
             if confidence >= 0.80:
                 return RiskLevel.CRITICAL
             elif confidence >= 0.60:
                 return RiskLevel.HIGH
-            elif confidence >= 0.30:
+            elif confidence >= 0.35:
                 return RiskLevel.MEDIUM
+            # Below 0.35 is LOW
         
         return RiskLevel.LOW
 
@@ -360,8 +370,13 @@ class RecommendationEngine:
             reverse=True
         )
         
-        # Determine overall priority
-        overall_priority = self._calculate_overall_priority(fraud_level, chargeback_level, amount)
+        # Calculate overall risk level based on combined_risk_score (this is the primary risk indicator)
+        overall_risk_level = self._classify_overall_risk_level(combined_risk_score)
+        
+        # Determine overall priority (based on risk level, individual levels, and amount)
+        overall_priority = self._calculate_overall_priority(
+            overall_risk_level, fraud_level, chargeback_level, amount, combined_risk_score
+        )
         
         # Generate ML-driven insights
         insights = self._generate_insights(fraud_pred, chargeback_pred, transaction_features, customer_history)
@@ -395,10 +410,11 @@ class RecommendationEngine:
             }
         }
         
-        return {
+        result = {
             "transaction_id": tx_id,
             "created_at": datetime.utcnow().isoformat(),
             "model_version": "3.0.0",
+            "risk_level": overall_risk_level.value,  # Primary risk level based on combined score
             "overall_priority": overall_priority,
             "combined_risk_score": round(combined_risk_score, 4),
             "risk_assessment": {
@@ -433,16 +449,43 @@ class RecommendationEngine:
             "estimated_total_savings": round(sum(a["expected_savings"] for a in cost_benefit_analysis), 2),
             "ttl_days": 30
         }
-
-    def _calculate_overall_priority(self, fraud_level: RiskLevel, chargeback_level: RiskLevel, amount: float) -> str:
-        """Calculate overall priority based on all risk factors"""
         
-        if fraud_level == RiskLevel.CRITICAL or chargeback_level == RiskLevel.CRITICAL:
+        return result
+
+    def _classify_overall_risk_level(self, combined_risk_score: float) -> RiskLevel:
+        """
+        Classify overall risk level based on combined risk score.
+        This is the primary risk indicator that considers all factors.
+        Production thresholds optimized for balanced fraud/chargeback prevention.
+        """
+        # Ensure score is valid
+        combined_risk_score = max(0.0, min(1.0, float(combined_risk_score)))
+        
+        if combined_risk_score >= 0.85:
+            return RiskLevel.CRITICAL
+        elif combined_risk_score >= 0.65:
+            return RiskLevel.HIGH
+        elif combined_risk_score >= 0.40:
+            return RiskLevel.MEDIUM
+        else:
+            return RiskLevel.LOW
+    
+    def _calculate_overall_priority(self, overall_risk_level: RiskLevel, fraud_level: RiskLevel, 
+                                   chargeback_level: RiskLevel, amount: float, combined_risk_score: float) -> str:
+        """Calculate overall priority based on all risk factors, prioritizing combined_risk_score"""
+        
+        # Priority is primarily determined by overall risk level (which uses combined_risk_score)
+        if overall_risk_level == RiskLevel.CRITICAL:
             return "critical"
-        elif fraud_level == RiskLevel.HIGH or chargeback_level == RiskLevel.HIGH:
+        elif overall_risk_level == RiskLevel.HIGH:
             return "high"
-        elif fraud_level == RiskLevel.MEDIUM or chargeback_level == RiskLevel.MEDIUM:
+        elif overall_risk_level == RiskLevel.MEDIUM:
             return "medium"
+        # If overall risk is LOW but individual factors are high, escalate
+        elif fraud_level == RiskLevel.CRITICAL or chargeback_level == RiskLevel.CRITICAL:
+            return "high"  # Even if combined score is low, critical individual factors matter
+        elif fraud_level == RiskLevel.HIGH or chargeback_level == RiskLevel.HIGH:
+            return "medium"  # High individual risk with low combined score needs attention
         elif amount >= self.amount_thresholds["high"]:
             return "medium"  # High amount with low risk still needs attention
         else:
