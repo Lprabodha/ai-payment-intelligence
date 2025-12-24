@@ -36,12 +36,128 @@ from scipy.spatial.distance import pdist, squareform
 import networkx as nx
 import optuna
 from optuna.samplers import TPESampler
+from sklearn.base import BaseEstimator, ClassifierMixin
 
 # Import evaluation utility
 import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from utils.model_evaluation import ModelEvaluator
+
+
+class CatBoostClassifierWrapper(BaseEstimator, ClassifierMixin):
+    """Wrapper for CatBoostClassifier to fix sklearn compatibility issues"""
+    
+    def __init__(self, **kwargs):
+        self.catboost_model = CatBoostClassifier(**kwargs)
+        # Store parameters for sklearn compatibility
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+    
+    def fit(self, X, y=None, **fit_params):
+        """Fit the CatBoost model"""
+        self.catboost_model.fit(X, y, **fit_params)
+        # Mark as fitted for sklearn compatibility
+        self._is_fitted = True
+        return self
+    
+    def predict(self, X):
+        """Predict class labels"""
+        return self.catboost_model.predict(X)
+    
+    def predict_proba(self, X):
+        """Predict class probabilities"""
+        return self.catboost_model.predict_proba(X)
+    
+    def get_params(self, deep=True):
+        """Get parameters"""
+        params = self.catboost_model.get_params(deep=deep)
+        return params
+    
+    def set_params(self, **params):
+        """Set parameters"""
+        self.catboost_model.set_params(**params)
+        # Update stored parameters
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+    
+    def __sklearn_is_fitted__(self):
+        """Check if model is fitted - required by sklearn"""
+        # Check if the wrapper has been marked as fitted
+        if hasattr(self, '_is_fitted') and self._is_fitted:
+            return True
+        # Also check if the underlying model has been fitted
+        return hasattr(self.catboost_model, '_object') or hasattr(self.catboost_model, 'is_fitted_')
+    
+    def __sklearn_tags__(self):
+        """Return sklearn tags - required by newer sklearn versions"""
+        # Return default tags for a classifier
+        return {
+            'binary_only': False,
+            'multilabel': False,
+            'multioutput': False,
+            'no_validation': False,
+            'non_deterministic': False,
+            'pairwise': False,
+            'poor_score': False,
+            'requires_fit': True,
+            'requires_y': True,
+            'requires_positive_X': False,
+            'requires_positive_y': False,
+            'X_types': ['2darray']
+        }
+    
+    def __getattr__(self, name):
+        """Delegate all other attributes to the underlying CatBoost model"""
+        return getattr(self.catboost_model, name)
+
+
+class PreFittedModelWrapper(BaseEstimator, ClassifierMixin):
+    """Wrapper for pre-fitted models that can be pickled (for CatBoost direct training)"""
+    
+    def __init__(self, model=None, scaler=None, sampler=None):
+        self.model = model
+        self.scaler = scaler
+        self.sampler = sampler
+    
+    def fit(self, X, y):
+        """Model is already fitted, just return self"""
+        return self
+    
+    def predict_proba(self, X):
+        """Predict class probabilities"""
+        if self.scaler is not None:
+            X_scaled = self.scaler.transform(X)
+        else:
+            X_scaled = X
+        return self.model.predict_proba(X_scaled)
+    
+    def predict(self, X):
+        """Predict class labels"""
+        if self.scaler is not None:
+            X_scaled = self.scaler.transform(X)
+        else:
+            X_scaled = X
+        return self.model.predict(X_scaled)
+    
+    def get_params(self, deep=True):
+        """Get parameters for sklearn compatibility"""
+        return {
+            'model': self.model if deep else None,
+            'scaler': self.scaler if deep else None,
+            'sampler': self.sampler if deep else None
+        }
+    
+    def set_params(self, **params):
+        """Set parameters for sklearn compatibility"""
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+    
+    def __sklearn_is_fitted__(self):
+        """Check if model is fitted"""
+        return self.model is not None
 
 
 class ChargebackPredictionModel:
@@ -450,7 +566,7 @@ class ChargebackPredictionModel:
                     'verbose': -1
                 })
             ),
-            'catboost': CatBoostClassifier(
+            'catboost': CatBoostClassifierWrapper(
                 **optimized_params.get('catboost', {
                     'iterations': 1400,
                     'depth': 7,
@@ -502,25 +618,54 @@ class ChargebackPredictionModel:
         for name, model in models.items():
             print(f"Training {name}...")
             
-            # Create pipeline with sampling and scaling
-            pipeline = ImbPipeline([
-                ('sampling', sampling_strategies[name]),
-                ('scaler', RobustScaler()),
-                ('model', model)
-            ])
-            
-            # Train model
-            pipeline.fit(X_train, y_train)
-            
-            # Validate
-            y_val_pred = pipeline.predict_proba(X_val)[:, 1]
-            val_auc = roc_auc_score(y_val, y_val_pred)
-            val_pr_auc = average_precision_score(y_val, y_val_pred)
-            
-            print(f"[COMPLETE] {name} - Val AUC: {val_auc:.4f}, Val PR-AUC: {val_pr_auc:.4f}")
-            
-            trained_models[name] = pipeline
-            base_estimators.append((name, pipeline))
+            try:
+                # Create pipeline with sampling and scaling
+                pipeline = ImbPipeline([
+                    ('sampling', sampling_strategies[name]),
+                    ('scaler', RobustScaler()),
+                    ('model', model)
+                ])
+                
+                # Train model
+                pipeline.fit(X_train, y_train)
+                
+                # Validate
+                y_val_pred = pipeline.predict_proba(X_val)[:, 1]
+                val_auc = roc_auc_score(y_val, y_val_pred)
+                val_pr_auc = average_precision_score(y_val, y_val_pred)
+                
+                print(f"[COMPLETE] {name} - Val AUC: {val_auc:.4f}, Val PR-AUC: {val_pr_auc:.4f}")
+                
+                trained_models[name] = pipeline
+                base_estimators.append((name, pipeline))
+            except (AttributeError, TypeError) as e:
+                # Handle CatBoost compatibility issues by training without pipeline
+                if 'catboost' in name.lower() or '__sklearn_tags__' in str(e).lower():
+                    print(f"Warning: {name} compatibility issue with pipeline. Training directly (will skip from stacking ensemble)...")
+                    # Train model directly without pipeline
+                    X_train_balanced, y_train_balanced = sampling_strategies[name].fit_resample(X_train, y_train)
+                    scaler = RobustScaler()
+                    X_train_scaled = scaler.fit_transform(X_train_balanced)
+                    X_val_scaled = scaler.transform(X_val)
+                    
+                    # Fit model directly
+                    model.fit(X_train_scaled, y_train_balanced)
+                    
+                    # Validate
+                    y_val_pred = model.predict_proba(X_val_scaled)[:, 1]
+                    val_auc = roc_auc_score(y_val, y_val_pred)
+                    val_pr_auc = average_precision_score(y_val, y_val_pred)
+                    
+                    print(f"[COMPLETE] {name} (direct) - Val AUC: {val_auc:.4f}, Val PR-AUC: {val_pr_auc:.4f}")
+                    
+                    # Store the trained model using a picklable wrapper
+                    # Skip from stacking ensemble since it can't be cloned properly for cross-validation
+                    wrapped_model = PreFittedModelWrapper(model=model, scaler=scaler, sampler=sampling_strategies[name])
+                    trained_models[name] = wrapped_model
+                    # Don't add to base_estimators - skip from stacking
+                    print(f"  Note: {name} will be excluded from stacking ensemble due to compatibility issues")
+                else:
+                    raise e
         
         if use_stacking:
             # Create stacking classifier with logistic regression meta-learner
@@ -792,7 +937,19 @@ class ChargebackPredictionModel:
         
         # Save individual models
         for name, model in individual_models.items():
-            joblib.dump(model, f"/src/data/models/chargeback_prediction_{name}.pkl")
+            try:
+                joblib.dump(model, f"/src/data/models/chargeback_prediction_{name}.pkl")
+            except Exception as e:
+                print(f"  Warning: Could not save {name} model: {e}")
+                # If it's a PreFittedModelWrapper, try saving components separately
+                if isinstance(model, PreFittedModelWrapper):
+                    try:
+                        # Save model, scaler separately
+                        joblib.dump(model.model, f"/src/data/models/chargeback_prediction_{name}_model.pkl")
+                        joblib.dump(model.scaler, f"/src/data/models/chargeback_prediction_{name}_scaler.pkl")
+                        print(f"  Saved {name} model and scaler separately")
+                    except Exception as e2:
+                        print(f"  Error saving {name} components: {e2}")
         print(f"  Saved {len(individual_models)} individual models")
         
         # Save metadata

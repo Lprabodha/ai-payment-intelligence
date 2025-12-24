@@ -52,46 +52,188 @@ class ModelEvaluator:
             threshold: Classification threshold
             save_images: Whether to save visualization images
         """
+        # Convert inputs to numpy arrays and ensure proper data types
+        if isinstance(y_true, (pd.Series, pd.DataFrame)):
+            y_true = y_true.values
+        y_true = np.asarray(y_true, dtype=np.int64).flatten()
+        
+        # Validate inputs
+        if len(y_true) == 0:
+            raise ValueError("y_true is empty")
+        if not np.all(np.isin(y_true, [0, 1])):
+            raise ValueError("y_true must contain only 0 and 1 values")
+        
         # Convert to binary if needed
         if y_pred_proba is not None:
-            y_pred_binary = (y_pred_proba >= threshold).astype(int)
+            if isinstance(y_pred_proba, (pd.Series, pd.DataFrame)):
+                y_pred_proba = y_pred_proba.values
+            y_pred_proba = np.asarray(y_pred_proba, dtype=np.float64).flatten()
+            
+            # Handle NaN/inf in probabilities
+            y_pred_proba = np.nan_to_num(y_pred_proba, nan=0.0, posinf=1.0, neginf=0.0)
+            y_pred_proba = np.clip(y_pred_proba, 0.0, 1.0)
+            
+            y_pred_binary = (y_pred_proba >= threshold).astype(np.int64)
         elif y_pred is not None:
-            y_pred_binary = y_pred
+            if isinstance(y_pred, (pd.Series, pd.DataFrame)):
+                y_pred = y_pred.values
+            y_pred_binary = np.asarray(y_pred, dtype=np.int64).flatten()
         else:
             raise ValueError("Either y_pred or y_pred_proba must be provided")
+        
+        # Ensure same length
+        if len(y_true) != len(y_pred_binary):
+            raise ValueError(f"y_true (len={len(y_true)}) and y_pred_binary (len={len(y_pred_binary)}) must have the same length")
+        
+        # Calculate metrics with proper validation
+        try:
+            # Calculate accuracy manually from confusion matrix for verification
+            cm_temp = confusion_matrix(y_true, y_pred_binary)
+            total_samples = len(y_true)
+            if total_samples > 0:
+                correct_predictions = np.sum(y_true == y_pred_binary)
+                accuracy_manual = float(correct_predictions) / float(total_samples)
+            else:
+                accuracy_manual = 0.0
             
-        # Calculate metrics
-        metrics = {
-            'accuracy': accuracy_score(y_true, y_pred_binary),
-            'precision': precision_score(y_true, y_pred_binary, zero_division=0),
-            'recall': recall_score(y_true, y_pred_binary, zero_division=0),
-            'f1_score': f1_score(y_true, y_pred_binary, zero_division=0),
-            'threshold': threshold
-        }
+            # Use sklearn accuracy_score (should match manual calculation)
+            accuracy_sklearn = float(accuracy_score(y_true, y_pred_binary))
+            
+            # Use the sklearn version (it handles edge cases better)
+            # But verify it's reasonable
+            if np.isnan(accuracy_sklearn) or np.isinf(accuracy_sklearn):
+                accuracy_sklearn = accuracy_manual
+            
+            metrics = {
+                'accuracy': accuracy_sklearn,
+                'precision': float(precision_score(y_true, y_pred_binary, zero_division=0)),
+                'recall': float(recall_score(y_true, y_pred_binary, zero_division=0)),
+                'f1_score': float(f1_score(y_true, y_pred_binary, zero_division=0)),
+                'threshold': float(threshold)
+            }
+            
+            # Validate metrics are not NaN and clamp to [0, 1]
+            for key, value in metrics.items():
+                if key == 'threshold':
+                    continue  # threshold can be any value
+                if isinstance(value, float):
+                    if np.isnan(value) or np.isinf(value):
+                        metrics[key] = 0.0
+                    else:
+                        # Clamp classification metrics to [0, 1]
+                        metrics[key] = max(0.0, min(1.0, float(value)))
+        except Exception as e:
+            print(f"Warning: Error calculating classification metrics: {e}")
+            metrics = {
+                'accuracy': 0.0,
+                'precision': 0.0,
+                'recall': 0.0,
+                'f1_score': 0.0,
+                'threshold': float(threshold)
+            }
         
         # Add probability-based metrics if available
         if y_pred_proba is not None:
-            metrics['roc_auc'] = roc_auc_score(y_true, y_pred_proba)
-            metrics['pr_auc'] = average_precision_score(y_true, y_pred_proba)
-            
-            # Find optimal threshold
-            precision_vals, recall_vals, thresholds = precision_recall_curve(y_true, y_pred_proba)
-            f1_scores = 2 * (precision_vals * recall_vals) / (precision_vals + recall_vals + 1e-9)
-            optimal_idx = np.argmax(f1_scores)
-            metrics['optimal_threshold'] = float(thresholds[optimal_idx])
-            metrics['optimal_f1'] = float(f1_scores[optimal_idx])
+            try:
+                # Check if we have both classes
+                if len(np.unique(y_true)) < 2:
+                    print("Warning: y_true contains only one class, skipping ROC/PR AUC")
+                    metrics['roc_auc'] = 0.0
+                    metrics['pr_auc'] = 0.0
+                else:
+                    metrics['roc_auc'] = float(roc_auc_score(y_true, y_pred_proba))
+                    metrics['pr_auc'] = float(average_precision_score(y_true, y_pred_proba))
+                    
+                    # Validate AUC scores
+                    if np.isnan(metrics['roc_auc']) or np.isinf(metrics['roc_auc']):
+                        metrics['roc_auc'] = 0.0
+                    if np.isnan(metrics['pr_auc']) or np.isinf(metrics['pr_auc']):
+                        metrics['pr_auc'] = 0.0
+                
+                # Find optimal threshold
+                try:
+                    precision_vals, recall_vals, thresholds = precision_recall_curve(y_true, y_pred_proba)
+                    if len(thresholds) > 0 and len(precision_vals) > 0 and len(recall_vals) > 0:
+                        # Calculate F1 for each threshold
+                        f1_scores = 2 * (precision_vals[:-1] * recall_vals[:-1]) / (precision_vals[:-1] + recall_vals[:-1] + 1e-9)
+                        f1_scores = np.nan_to_num(f1_scores, nan=0.0)
+                        optimal_idx = np.argmax(f1_scores)
+                        if optimal_idx < len(thresholds):
+                            metrics['optimal_threshold'] = float(thresholds[optimal_idx])
+                            metrics['optimal_f1'] = float(f1_scores[optimal_idx])
+                        else:
+                            metrics['optimal_threshold'] = threshold
+                            metrics['optimal_f1'] = metrics['f1_score']
+                    else:
+                        metrics['optimal_threshold'] = threshold
+                        metrics['optimal_f1'] = metrics['f1_score']
+                except Exception as e:
+                    print(f"Warning: Error finding optimal threshold: {e}")
+                    metrics['optimal_threshold'] = threshold
+                    metrics['optimal_f1'] = metrics['f1_score']
+            except Exception as e:
+                print(f"Warning: Error calculating probability-based metrics: {e}")
+                metrics['roc_auc'] = 0.0
+                metrics['pr_auc'] = 0.0
+                metrics['optimal_threshold'] = threshold
+                metrics['optimal_f1'] = metrics['f1_score']
         
-        # Confusion matrix
-        cm = confusion_matrix(y_true, y_pred_binary)
-        metrics['confusion_matrix'] = cm.tolist()
-        metrics['true_negatives'] = int(cm[0, 0])
-        metrics['false_positives'] = int(cm[0, 1])
-        metrics['false_negatives'] = int(cm[1, 0])
-        metrics['true_positives'] = int(cm[1, 1])
+        # Confusion matrix (use validated arrays)
+        try:
+            cm = confusion_matrix(y_true, y_pred_binary)
+            metrics['confusion_matrix'] = cm.tolist()
+            # Handle different confusion matrix sizes
+            if cm.shape == (2, 2):
+                metrics['true_negatives'] = int(cm[0, 0])
+                metrics['false_positives'] = int(cm[0, 1])
+                metrics['false_negatives'] = int(cm[1, 0])
+                metrics['true_positives'] = int(cm[1, 1])
+            elif cm.shape == (1, 1):
+                # Only one class present
+                unique_classes = np.unique(y_true)
+                if len(unique_classes) > 0 and unique_classes[0] == 0:
+                    metrics['true_negatives'] = int(cm[0, 0])
+                    metrics['false_positives'] = 0
+                    metrics['false_negatives'] = 0
+                    metrics['true_positives'] = 0
+                else:
+                    metrics['true_negatives'] = 0
+                    metrics['false_positives'] = 0
+                    metrics['false_negatives'] = 0
+                    metrics['true_positives'] = int(cm[0, 0])
+            else:
+                metrics['true_negatives'] = 0
+                metrics['false_positives'] = 0
+                metrics['false_negatives'] = 0
+                metrics['true_positives'] = 0
+            
+            # Verify accuracy from confusion matrix
+            total = metrics['true_positives'] + metrics['true_negatives'] + metrics['false_positives'] + metrics['false_negatives']
+            if total > 0:
+                accuracy_from_cm = (metrics['true_positives'] + metrics['true_negatives']) / float(total)
+                # Update accuracy if there's a significant discrepancy (more than 0.001)
+                current_accuracy = metrics.get('accuracy', 0)
+                if abs(current_accuracy - accuracy_from_cm) > 0.001:
+                    print(f"Warning: Accuracy mismatch. sklearn: {current_accuracy:.6f}, from CM: {accuracy_from_cm:.6f}. Using CM value.")
+                    # Use the confusion matrix calculation as it's more explicit
+                    metrics['accuracy'] = float(accuracy_from_cm)
+                # Ensure accuracy is clamped to [0, 1]
+                metrics['accuracy'] = max(0.0, min(1.0, float(metrics['accuracy'])))
+        except Exception as e:
+            print(f"Warning: Error calculating confusion matrix: {e}")
+            metrics['confusion_matrix'] = [[0, 0], [0, 0]]
+            metrics['true_negatives'] = 0
+            metrics['false_positives'] = 0
+            metrics['false_negatives'] = 0
+            metrics['true_positives'] = 0
         
         # Classification report
-        report = classification_report(y_true, y_pred_binary, output_dict=True, zero_division=0)
-        metrics['classification_report'] = report
+        try:
+            report = classification_report(y_true, y_pred_binary, output_dict=True, zero_division=0)
+            metrics['classification_report'] = report
+        except Exception as e:
+            print(f"Warning: Error generating classification report: {e}")
+            metrics['classification_report'] = {}
         
         self.metrics = metrics
         
@@ -112,22 +254,100 @@ class ModelEvaluator:
             y_pred: Predicted values
             save_images: Whether to save visualization images
         """
-        # Calculate metrics
-        metrics = {
-            'mae': mean_absolute_error(y_true, y_pred),
-            'mse': mean_squared_error(y_true, y_pred),
-            'rmse': np.sqrt(mean_squared_error(y_true, y_pred)),
-            'r2_score': r2_score(y_true, y_pred),
-            'mape': mean_absolute_percentage_error(y_true, y_pred),
-            'mean_absolute_error': mean_absolute_error(y_true, y_pred),
-            'mean_squared_error': mean_squared_error(y_true, y_pred)
-        }
+        # Convert inputs to numpy arrays and ensure proper data types
+        if isinstance(y_true, (pd.Series, pd.DataFrame)):
+            y_true = y_true.values
+        if isinstance(y_pred, (pd.Series, pd.DataFrame)):
+            y_pred = y_pred.values
+            
+        y_true = np.asarray(y_true, dtype=np.float64).flatten()
+        y_pred = np.asarray(y_pred, dtype=np.float64).flatten()
+        
+        # Validate inputs
+        if len(y_true) == 0:
+            raise ValueError("y_true is empty")
+        if len(y_pred) == 0:
+            raise ValueError("y_pred is empty")
+        if len(y_true) != len(y_pred):
+            raise ValueError(f"y_true (len={len(y_true)}) and y_pred (len={len(y_pred)}) must have the same length")
+        
+        # Handle NaN/inf values
+        valid_mask = np.isfinite(y_true) & np.isfinite(y_pred)
+        if not np.all(valid_mask):
+            print(f"Warning: Found {np.sum(~valid_mask)} invalid values (NaN/inf), removing them")
+            y_true = y_true[valid_mask]
+            y_pred = y_pred[valid_mask]
+            if len(y_true) == 0:
+                raise ValueError("No valid values remaining after removing NaN/inf")
+        
+        # Calculate metrics with proper validation
+        try:
+            mae_val = mean_absolute_error(y_true, y_pred)
+            mse_val = mean_squared_error(y_true, y_pred)
+            rmse_val = np.sqrt(mse_val)
+            r2_val = r2_score(y_true, y_pred)
+            
+            # Handle edge case for R2 (can be negative or inf)
+            if np.isnan(r2_val) or np.isinf(r2_val):
+                # Fallback: calculate manually
+                ss_res = np.sum((y_true - y_pred) ** 2)
+                ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+                if ss_tot > 1e-10:
+                    r2_val = 1 - (ss_res / ss_tot)
+                else:
+                    r2_val = 0.0
+            
+            # Calculate MAPE with protection against division by zero
+            try:
+                mape_val = mean_absolute_percentage_error(y_true, y_pred)
+                if np.isnan(mape_val) or np.isinf(mape_val):
+                    mape_val = 0.0
+            except:
+                # Manual MAPE calculation with protection
+                abs_errors = np.abs(y_true - y_pred)
+                abs_true = np.abs(y_true)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    mape_val = np.mean(np.where(abs_true > 1e-10, abs_errors / abs_true, 0.0)) * 100
+                if np.isnan(mape_val) or np.isinf(mape_val):
+                    mape_val = 0.0
+            
+            metrics = {
+                'mae': float(mae_val),
+                'mse': float(mse_val),
+                'rmse': float(rmse_val),
+                'r2_score': float(r2_val),
+                'mape': float(mape_val),
+                'mean_absolute_error': float(mae_val),
+                'mean_squared_error': float(mse_val)
+            }
+        except Exception as e:
+            print(f"Warning: Error calculating regression metrics: {e}")
+            metrics = {
+                'mae': 0.0,
+                'mse': 0.0,
+                'rmse': 0.0,
+                'r2_score': 0.0,
+                'mape': 0.0,
+                'mean_absolute_error': 0.0,
+                'mean_squared_error': 0.0
+            }
         
         # Additional statistics
-        residuals = y_true - y_pred
-        metrics['mean_residual'] = float(np.mean(residuals))
-        metrics['std_residual'] = float(np.std(residuals))
-        metrics['max_error'] = float(np.max(np.abs(residuals)))
+        try:
+            residuals = y_true - y_pred
+            metrics['mean_residual'] = float(np.mean(residuals))
+            metrics['std_residual'] = float(np.std(residuals))
+            metrics['max_error'] = float(np.max(np.abs(residuals)))
+            
+            # Validate additional stats
+            for key in ['mean_residual', 'std_residual', 'max_error']:
+                if np.isnan(metrics[key]) or np.isinf(metrics[key]):
+                    metrics[key] = 0.0
+        except Exception as e:
+            print(f"Warning: Error calculating residual statistics: {e}")
+            metrics['mean_residual'] = 0.0
+            metrics['std_residual'] = 0.0
+            metrics['max_error'] = 0.0
         
         self.metrics = metrics
         
@@ -189,17 +409,22 @@ class ModelEvaluator:
             self.metrics.get('recall', 0),
             self.metrics.get('f1_score', 0)
         ]
+        # Ensure all values are valid
+        metric_values = [max(0.0, min(1.0, float(v))) if not (np.isnan(v) or np.isinf(v)) else 0.0 for v in metric_values]
+        
         bars = ax4.bar(metric_names, metric_values, color=['#3498db', '#2ecc71', '#e74c3c', '#f39c12'])
         ax4.set_ylim([0, 1])
         ax4.set_ylabel('Score')
         ax4.set_title(f'{self.model_name} - Classification Metrics', fontsize=14, fontweight='bold')
         ax4.grid(True, alpha=0.3, axis='y')
         
-        # Add value labels on bars
-        for bar in bars:
+        # Add value labels on bars (display as percentage)
+        for i, bar in enumerate(bars):
             height = bar.get_height()
-            ax4.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{height:.4f}', ha='center', va='bottom', fontweight='bold')
+            # Display as percentage with 2 decimal places
+            percentage = height * 100
+            ax4.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                    f'{percentage:.2f}%', ha='center', va='bottom', fontweight='bold', fontsize=10)
         
         # 5. Prediction Distribution
         ax5 = plt.subplot(2, 3, 5)
@@ -218,20 +443,44 @@ class ModelEvaluator:
         ax6 = plt.subplot(2, 3, 6)
         ax6.axis('off')
         
-        # Create metrics table
+        # Create metrics table (display as percentages for classification metrics)
         table_data = []
         if 'accuracy' in self.metrics:
-            table_data.append(['Accuracy', f"{self.metrics['accuracy']:.4f}"])
+            acc_val = self.metrics['accuracy']
+            if not (np.isnan(acc_val) or np.isinf(acc_val)):
+                table_data.append(['Accuracy', f"{acc_val * 100:.2f}%"])
+            else:
+                table_data.append(['Accuracy', "0.00%"])
         if 'precision' in self.metrics:
-            table_data.append(['Precision', f"{self.metrics['precision']:.4f}"])
+            prec_val = self.metrics['precision']
+            if not (np.isnan(prec_val) or np.isinf(prec_val)):
+                table_data.append(['Precision', f"{prec_val * 100:.2f}%"])
+            else:
+                table_data.append(['Precision', "0.00%"])
         if 'recall' in self.metrics:
-            table_data.append(['Recall', f"{self.metrics['recall']:.4f}"])
+            recall_val = self.metrics['recall']
+            if not (np.isnan(recall_val) or np.isinf(recall_val)):
+                table_data.append(['Recall', f"{recall_val * 100:.2f}%"])
+            else:
+                table_data.append(['Recall', "0.00%"])
         if 'f1_score' in self.metrics:
-            table_data.append(['F1 Score', f"{self.metrics['f1_score']:.4f}"])
+            f1_val = self.metrics['f1_score']
+            if not (np.isnan(f1_val) or np.isinf(f1_val)):
+                table_data.append(['F1 Score', f"{f1_val * 100:.2f}%"])
+            else:
+                table_data.append(['F1 Score', "0.00%"])
         if 'roc_auc' in self.metrics:
-            table_data.append(['ROC AUC', f"{self.metrics['roc_auc']:.4f}"])
+            roc_val = self.metrics['roc_auc']
+            if not (np.isnan(roc_val) or np.isinf(roc_val)):
+                table_data.append(['ROC AUC', f"{roc_val:.4f}"])
+            else:
+                table_data.append(['ROC AUC', "0.0000"])
         if 'pr_auc' in self.metrics:
-            table_data.append(['PR AUC', f"{self.metrics['pr_auc']:.4f}"])
+            pr_val = self.metrics['pr_auc']
+            if not (np.isnan(pr_val) or np.isinf(pr_val)):
+                table_data.append(['PR AUC', f"{pr_val:.4f}"])
+            else:
+                table_data.append(['PR AUC', "0.0000"])
         if 'optimal_threshold' in self.metrics:
             table_data.append(['Optimal Threshold', f"{self.metrics['optimal_threshold']:.4f}"])
         
@@ -271,8 +520,10 @@ class ModelEvaluator:
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         
-        # Add R² score
-        r2 = r2_score(y_true, y_pred)
+        # Add R² score (use from metrics to ensure consistency)
+        r2 = self.metrics.get('r2_score', 0.0)
+        if np.isnan(r2) or np.isinf(r2):
+            r2 = 0.0
         ax1.text(0.05, 0.95, f'R² = {r2:.4f}', transform=ax1.transAxes,
                 fontsize=12, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
@@ -435,11 +686,37 @@ class ModelEvaluator:
         
         filepath = os.path.join(self.output_dir, filename)
         
-        # Add timestamp
+        # Convert numpy types to native Python types for JSON serialization
+        def convert_to_json_serializable(obj):
+            """Recursively convert numpy types to native Python types"""
+            if isinstance(obj, (np.integer, np.int64, np.int32)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float64, np.float32)):
+                # Handle NaN and inf
+                if np.isnan(obj):
+                    return None
+                elif np.isinf(obj):
+                    return None
+                return float(obj)
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {key: convert_to_json_serializable(value) for key, value in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [convert_to_json_serializable(item) for item in obj]
+            elif isinstance(obj, (datetime, pd.Timestamp)):
+                return obj.isoformat()
+            else:
+                return obj
+        
+        # Add timestamp and convert metrics
+        metrics_serializable = convert_to_json_serializable(self.metrics)
         metrics_with_meta = {
             'model_name': self.model_name,
             'evaluated_at': datetime.now().isoformat(),
-            'metrics': self.metrics
+            'metrics': metrics_serializable
         }
         
         with open(filepath, 'w') as f:
